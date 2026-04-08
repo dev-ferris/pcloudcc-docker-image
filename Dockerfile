@@ -66,6 +66,10 @@ ENV PCLOUD_USER="" \
     BINDFS_TARGET="/pcloud"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD mountpoint -q "${BINDFS_TARGET}" && [ -n "$(ls -A ${BINDFS_TARGET} 2>/dev/null)" ] || exit 1
+    CMD if [ "${ENABLE_BINDFS}" = "1" ]; then \
+          mountpoint -q "${BINDFS_TARGET}" && [ -n "$(ls -A "${BINDFS_TARGET}" 2>/dev/null)" ]; \
+        else \
+          mountpoint -q "${PCLOUD_MOUNT}" && [ -n "$(ls -A "${PCLOUD_MOUNT}" 2>/dev/null)" ]; \
+        fi
 
 ENTRYPOINT ["/entrypoint.sh"]
