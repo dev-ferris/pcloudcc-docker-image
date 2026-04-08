@@ -1,0 +1,25 @@
+volumes:
+  pconfig: {}
+
+services:
+  pcloud:
+    build:
+      context: .
+      args:
+        PCLOUDCC_REF: main
+    restart: unless-stopped
+    volumes:
+      - pconfig:/root/.pcloud:rw
+      - /path/to/your/pcloud:/pcloud:rshared
+    env_file:
+      - .env
+    environment:
+      - ENABLE_BINDFS=1
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    stdin_open: true
+    tty: true

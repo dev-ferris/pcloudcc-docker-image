@@ -1,2 +1,160 @@
 # pcloudcc-docker-image
-Docker image for pcloudcc (lneely fork) with bindfs support
+
+Docker image for [pcloudcc](https://github.com/lneely/pcloudcc-lneely) — a pCloud console client for Linux, based on the actively maintained `lneely` fork.
+
+This image fixes the SSL fingerprint issue introduced by pCloud's server certificate renewal in early 2026, which broke the original `pcloudcom/console-client` and most existing Docker images based on it.
+
+## Upstream projects
+
+This project is essentially a Docker packaging layer. All the real work happens upstream:
+
+- **[lneely/pcloudcc-lneely](https://github.com/lneely/pcloudcc-lneely)** — the actively maintained pcloudcc fork that this image is built from. Huge thanks to Levi Neely for keeping this alive after the original project went inactive. Without this fork, pCloud would be unusable on Linux today.
+- **[DjSni/docker-image-pCloud](https://github.com/DjSni/docker-image-pCloud)** — the Docker image this project replaces. The environment variables and compose setup here are compatible with DjSni's original, so it should be a drop-in replacement.
+- **[pCloud/console-client](https://github.com/pCloud/console-client)** — the original (now inactive) client by pCloud.
+
+## Features
+
+- Built from the [lneely fork](https://github.com/lneely/pcloudcc-lneely) with up-to-date SSL fingerprints
+- Based on `debian:trixie-slim` (Debian 13, mbedTLS 3.x native)
+- Supports EU and US pCloud regions
+- Optional 2FA support
+- Optional crypto folder unlock
+- Built-in `bindfs` for UID/GID remapping (useful on NAS setups)
+- Healthcheck included
+- POSIX-compliant entrypoint script with graceful shutdown
+- Compatible environment variables with the `DjSni/docker-image-pCloud` setup
+
+## Quick start
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/YOURNAME/pcloudcc-docker-image.git
+cd pcloudcc-docker-image
+```
+
+### 2. Create your `.env` file
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set at least `PCLOUD_USER`. Other values are optional:
+
+```env
+PCLOUD_USER=your@email.com
+PCLOUD_CRYPT=your_crypto_password
+UID=1000
+GID=1000
+```
+
+### 3. Adjust volume paths in `docker-compose.yml`
+
+By default, the compose file mounts `/path/to/your/pcloud` on the host. Change this to match your setup.
+
+### 4. Build and start
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+### 5. First-time login
+
+On the very first start, the container won't have saved credentials yet. Check the logs for instructions:
+
+```bash
+docker logs pcloud
+```
+
+You'll see something like:
+
+```
+No saved credentials found. Run the following inside the container:
+  pcloudcc -u your@email.com -m /pcloud_internal -p -s
+```
+
+Run that command interactively:
+
+```bash
+docker exec -it pcloud pcloudcc -u your@email.com -m /pcloud_internal -p -s
+```
+
+Enter your password when prompted. If you have 2FA enabled, add `-t` to the command. Once you see `status is READY`, press `Ctrl+C` and restart the container:
+
+```bash
+docker compose restart pcloud
+```
+
+From now on, the container will start automatically without manual intervention.
+
+## Environment variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PCLOUD_USER` | Yes | — | Your pCloud account email |
+| `PCLOUD_2FA` | No | — | 2FA code (only for first login) |
+| `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
+| `PCLOUD_MOUNT` | No | `/pcloud_internal` | Internal mount point (where pcloudcc mounts) |
+| `ENABLE_BINDFS` | No | `0` | Set to `1` to enable bindfs UID/GID remapping |
+| `BINDFS_TARGET` | No | `/pcloud` | Target path for bindfs overlay |
+| `UID` | No | `1000` | User ID for bindfs remapping |
+| `GID` | No | `1000` | Group ID for bindfs remapping |
+
+## How it works
+
+When `ENABLE_BINDFS=1` (the default in the compose file), the container mounts two filesystems:
+
+1. **pcloudcc** mounts your pCloud drive to `/pcloud_internal` (owned by root inside the container)
+2. **bindfs** overlays `/pcloud_internal` to `/pcloud` with the UID/GID you specified
+
+The `/pcloud` path is then shared to the host via the `rshared` volume mount, so files appear with the correct ownership on your host system.
+
+If you don't need UID/GID remapping, set `ENABLE_BINDFS=0` and mount `/pcloud_internal` directly to the host.
+
+## Updating
+
+To pull the latest version of pcloudcc:
+
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
+
+To pin to a specific version or commit of the lneely fork, edit `docker-compose.yml`:
+
+```yaml
+build:
+  context: .
+  args:
+    PCLOUDCC_REF: v1.2.3   # or a commit hash / branch name
+```
+
+## Troubleshooting
+
+**Container logs show `status is OFFLINE`:**
+This usually means the SSL fingerprint check failed or credentials are wrong. Rebuild with `--no-cache` to pull the latest lneely fork with updated fingerprints.
+
+**First-time login loop:**
+If `data.db` is not being created after login, make sure the `pconfig` volume is persistent and not being recreated.
+
+**Mount stuck after stop:**
+```bash
+fusermount -u /path/to/your/pcloud
+```
+
+## Migrating from DjSni/docker-image-pCloud
+
+This project is a drop-in replacement for [DjSni/docker-image-pCloud](https://github.com/DjSni/docker-image-pCloud). The environment variables (`PCLOUD_USER`, `PCLOUD_MOUNT`, `PCLOUD_2FA`, `PCLOUD_CRYPT`) work the same way. Just swap the image in your compose file with a `build:` section pointing to this repo, rebuild, and you're set.
+
+The main reason to migrate is that DjSni's image is based on the original `pcloudcom/console-client` v2.1.2, which stopped working after pCloud renewed their SSL certificates in early 2026. This image uses the actively maintained lneely fork with updated fingerprints.
+
+## Acknowledgments
+
+This project was created with the help of [Claude](https://claude.ai) (Anthropic). The Dockerfile, compose setup, and entrypoint script were iteratively developed and debugged in collaboration with Claude.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Note: `pcloudcc-lneely` itself is BSD-3-Clause licensed. This repository only contains the Docker packaging — all credit for the actual client goes to the lneely fork maintainers and the original pCloud developers.
