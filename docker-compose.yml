@@ -15,8 +15,13 @@ services:
       - .env
     environment:
       - ENABLE_BINDFS=1
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     security_opt:
       - apparmor:unconfined
+      - no-new-privileges:true
     devices:
       - /dev/fuse
     cap_add:
