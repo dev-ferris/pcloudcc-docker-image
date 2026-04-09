@@ -1,0 +1,43 @@
+name: Check upstream for new commits
+
+on:
+  schedule:
+    # Check every 6 hours for new commits in lneely/pcloudcc-lneely
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Get upstream latest commit SHA
+        id: upstream
+        run: |
+          SHA=$(curl -sf "https://api.github.com/repos/lneely/pcloudcc-lneely/commits/main" \
+            | jq -r '.sha')
+          if [ -z "${SHA}" ] || [ "${SHA}" = "null" ]; then
+            echo "ERROR: Failed to fetch upstream commit SHA" >&2
+            exit 1
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Upstream SHA: ${SHA}"
+
+      - name: Check against cached SHA
+        id: cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: upstream-sha.txt
+          key: upstream-sha-${{ steps.upstream.outputs.sha }}
+
+      - name: Trigger build on new upstream commit
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ steps.upstream.outputs.sha }}" > upstream-sha.txt
+          echo "New upstream commit detected: ${{ steps.upstream.outputs.sha }}"
+          gh workflow run docker-build.yml --repo "${{ github.repository }}"
+          echo "Build workflow triggered."
