@@ -10,7 +10,7 @@ on:
     branches:
       - main
   schedule:
-    # Rebuild weekly to pick up upstream changes (lneely fork + Debian updates)
+    # Weekly rebuild for Debian security updates (upstream changes detected by check-upstream.yml)
     - cron: '0 3 * * 0'
   workflow_dispatch:
 
@@ -52,6 +52,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=schedule,pattern=nightly
+            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' }}
 
       - name: Build and push
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
