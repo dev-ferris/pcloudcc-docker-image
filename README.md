@@ -1,5 +1,10 @@
 # pcloudcc-docker-image
 
+[![Build and publish](https://github.com/dev-ferris/pcloudcc-docker-image/actions/workflows/docker-build.yml/badge.svg)](https://github.com/dev-ferris/pcloudcc-docker-image/actions/workflows/docker-build.yml)
+[![Lint](https://github.com/dev-ferris/pcloudcc-docker-image/actions/workflows/lint.yml/badge.svg)](https://github.com/dev-ferris/pcloudcc-docker-image/actions/workflows/lint.yml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-pcloudcc--docker--image-2088FF?logo=github)](https://github.com/dev-ferris/pcloudcc-docker-image/pkgs/container/pcloudcc-docker-image)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+
 Docker image for [pcloudcc](https://github.com/lneely/pcloudcc-lneely) — a pCloud console client for Linux, based on the actively maintained `lneely` fork.
 
 This image fixes the SSL fingerprint issue introduced by pCloud's server certificate renewal in early 2026, which broke the original `pcloudcom/console-client` and most existing Docker images based on it.
@@ -26,14 +31,67 @@ This project is essentially a Docker packaging layer. All the real work happens 
 
 ## Quick start
 
-### 1. Clone the repository
+You have two options: pull the pre-built image from GHCR / Docker Hub (recommended), or build it yourself from this repository.
+
+### Option A: Use the pre-built image (recommended)
+
+Multi-arch images (`linux/amd64`, `linux/arm64`, `linux/arm/v7`) are published automatically on every push to `main` and on a weekly schedule. They are cosign-signed and ship with provenance and SBOM attestations.
+
+Minimal `docker-compose.yml`:
+
+```yaml
+volumes:
+  pconfig: {}
+
+services:
+  pcloud:
+    image: ghcr.io/dev-ferris/pcloudcc-docker-image:latest
+    # Or, from Docker Hub:
+    # image: <your-dockerhub-user>/pcloudcc-docker-image:latest
+    restart: unless-stopped
+    volumes:
+      - pconfig:/root/.pcloud:rw
+      - /path/to/your/pcloud:/pcloud:rshared
+    env_file:
+      - .env
+    environment:
+      - ENABLE_BINDFS=1
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    security_opt:
+      - apparmor:unconfined
+      - no-new-privileges:true
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    stdin_open: true
+    tty: true
+```
+
+Then jump straight to [step 2](#2-create-your-env-file).
+
+You can verify the image signature with cosign:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/dev-ferris/pcloudcc-docker-image/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/dev-ferris/pcloudcc-docker-image:latest
+```
+
+### Option B: Build from source
+
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/YOURNAME/pcloudcc-docker-image.git
 cd pcloudcc-docker-image
 ```
 
-### 2. Create your `.env` file
+#### 2. Create your `.env` file
 
 ```bash
 cp .env.example .env
@@ -48,18 +106,18 @@ UID=1000
 GID=1000
 ```
 
-### 3. Adjust volume paths in `docker-compose.yml`
+#### 3. Adjust volume paths in `docker-compose.yml`
 
 By default, the compose file mounts `/path/to/your/pcloud` on the host. Change this to match your setup.
 
-### 4. Build and start
+#### 4. Build and start
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-### 5. First-time login
+#### 5. First-time login
 
 On the very first start, the container won't have saved credentials yet. Check the logs for instructions:
 

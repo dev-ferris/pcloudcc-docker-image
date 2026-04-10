@@ -14,6 +14,13 @@ on:
     - cron: '0 3 * * 0'
   workflow_dispatch:
 
+concurrency:
+  # Serialize builds per ref so scheduled/upstream-triggered runs don't race with
+  # push-triggered ones. We don't cancel in-progress builds: multi-arch builds are
+  # expensive and we'd rather wait than throw work away.
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -24,6 +31,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write          # cosign keyless signing via GitHub OIDC
+      security-events: write   # upload Trivy SARIF results to the Security tab
 
     steps:
       - name: Checkout repository
@@ -32,7 +41,7 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
         with:
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
@@ -82,6 +91,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6
         with:
+          # metadata-action automatically emits OCI labels, including
+          # org.opencontainers.image.revision = ${{ github.sha }}, so the git SHA
+          # is baked into every published image via the labels: input below.
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             ${{ steps.dockerhub_check.outputs.enabled == 'true' && format('docker.io/{0}', steps.dockerhub_check.outputs.image) || '' }}
@@ -95,12 +107,84 @@ jobs:
             type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+          # Registry-backed cache shared across runs. cache-to is gated on non-PR
+          # because writing requires GHCR auth, which we only perform on push events.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true', env.REGISTRY, env.IMAGE_NAME) || '' }}
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Sign published images
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # Keyless sign every tag reference against the pushed manifest digest.
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Signing ${tag}@${DIGEST}"
+            cosign sign --yes "${tag}@${DIGEST}"
+          done <<< "$TAGS"
+
+      - name: Run Trivy vulnerability scanner
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always() && github.event_name != 'pull_request' && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      - name: Smoke test image (linux/amd64)
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$IMAGE" -c '
+            set -e
+            test -x /usr/local/bin/pcloudcc
+            test -x /entrypoint.sh
+            test -x /usr/bin/bindfs
+            echo "--- ldd /usr/local/bin/pcloudcc ---"
+            ldd /usr/local/bin/pcloudcc
+            if ldd /usr/local/bin/pcloudcc 2>&1 | grep -q "not found"; then
+              echo "ERROR: pcloudcc has unresolved shared libraries"
+              exit 1
+            fi
+            echo "Smoke test OK"
+          '
+
+      - name: Update Docker Hub description
+        if: >-
+          github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && steps.dockerhub_check.outputs.enabled == 'true'
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.dockerhub_check.outputs.image }}
+          short-description: ${{ github.event.repository.description }}
+          readme-filepath: ./README.md
