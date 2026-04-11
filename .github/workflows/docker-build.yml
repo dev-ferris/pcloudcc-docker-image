@@ -13,6 +13,12 @@ on:
     # Weekly rebuild for Debian security updates (upstream changes detected by check-upstream.yml)
     - cron: '0 3 * * 0'
   workflow_dispatch:
+    inputs:
+      pcloudcc_ref:
+        description: 'lneely/pcloudcc-lneely ref to build (branch, tag, or commit SHA)'
+        required: false
+        default: 'main'
+        type: string
 
 concurrency:
   # Serialize builds per ref so scheduled/upstream-triggered runs don't race with
@@ -115,6 +121,11 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # PCLOUDCC_REF defaults to 'main' for push/schedule/PR triggers and can be
+          # overridden on manual runs via the workflow_dispatch input (or by
+          # check-upstream.yml when a new upstream tag is detected).
+          build-args: |
+            PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
           provenance: mode=max
           sbom: true
           # Registry-backed cache shared across runs. cache-to is gated on non-PR

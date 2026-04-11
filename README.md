@@ -94,7 +94,7 @@ cd pcloudcc-docker-image
 #### 2. Create your `.env` file
 
 ```bash
-cp .env.example .env
+cp .env.sample .env
 ```
 
 Edit `.env` and set at least `PCLOUD_USER`. Other values are optional:
