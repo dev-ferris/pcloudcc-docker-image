@@ -1,0 +1,11 @@
+# hadolint configuration
+# https://github.com/hadolint/hadolint#configure
+
+ignored:
+  # DL3008: "Pin versions in apt get install"
+  # We intentionally don't pin apt package versions. Debian's archive is a
+  # rolling target — pinned versions disappear from the index within weeks
+  # and break the build. The base image tag (debian:trixie-slim) combined
+  # with the weekly rebuild schedule gives us reproducibility within a
+  # Debian point release, which is the right trade-off here.
+  - DL3008
