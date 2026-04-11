@@ -188,10 +188,21 @@ jobs:
           '
 
       - name: Update Docker Hub description
+        # The description sync hits Docker Hub's /v2/repositories/<ns>/<repo>/
+        # PATCH endpoint, which requires a higher token scope than plain image
+        # pushes. A PAT with "Read & Write" is enough to push layers but will
+        # return 403 Forbidden here. To actually update the description you
+        # need either:
+        #   - a Docker Hub PAT with the "Read, Write & Delete" scope, OR
+        #   - an Organization Access Token with repo-admin rights, OR
+        #   - the account password (not recommended).
+        # Either way we don't want a cosmetic sync to fail the entire build,
+        # so this step is best-effort.
         if: >-
           github.event_name == 'push'
           && github.ref == 'refs/heads/main'
           && steps.dockerhub_check.outputs.enabled == 'true'
+        continue-on-error: true
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
