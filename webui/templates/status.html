@@ -1,0 +1,50 @@
+{{template "layout" .}}
+
+{{define "title"}}Status{{end}}
+
+{{define "content"}}
+<h1>pCloud Drive Status</h1>
+
+{{if not .Status.SetupDone}}
+<div class="banner banner-warning">
+  First-time setup required.
+  <a href="/setup">Configure login credentials &rarr;</a>
+</div>
+{{end}}
+
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Connection</div>
+    <div class="card-value">
+      <span class="indicator {{.StateCSS}}"></span>
+      {{.StateText}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Mount</div>
+    <div class="card-value">
+      {{if .Status.Mounted}}Active{{else}}Inactive{{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">PID</div>
+    <div class="card-value">
+      {{if gt .Status.PID 0}}{{.Status.PID}}{{else}}&mdash;{{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Started</div>
+    <div class="card-value">
+      {{if .Status.StartedAt}}{{.Status.StartedAt}}{{else}}&mdash;{{end}}
+    </div>
+  </div>
+</div>
+
+<script>
+  // Auto-refresh status every 10 seconds.
+  setTimeout(function() { location.reload(); }, 10000);
+</script>
+{{end}}

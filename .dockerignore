@@ -5,3 +5,4 @@
 *.md
 LICENSE
 docker-compose.yml
+webui/

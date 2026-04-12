@@ -1,0 +1,59 @@
+{{template "layout" .}}
+
+{{define "title"}}Logs{{end}}
+
+{{define "content"}}
+<h1>pcloudcc Logs</h1>
+
+<div class="log-controls">
+  <label>
+    <input type="checkbox" id="autoscroll" checked> Auto-scroll
+  </label>
+  <button id="clear-btn" type="button">Clear</button>
+</div>
+
+<pre id="log-output" class="log-viewer"></pre>
+
+<script>
+(function() {
+  var output = document.getElementById('log-output');
+  var autoScroll = document.getElementById('autoscroll');
+  var clearBtn = document.getElementById('clear-btn');
+  var MAX_LINES = 1000;
+  var lineCount = 0;
+
+  clearBtn.addEventListener('click', function() {
+    output.textContent = '';
+    lineCount = 0;
+  });
+
+  function connect() {
+    var es = new EventSource('/api/logs/stream');
+
+    es.onmessage = function(e) {
+      var line = document.createTextNode(e.data + '\n');
+      output.appendChild(line);
+      lineCount++;
+
+      // Trim old lines.
+      while (lineCount > MAX_LINES && output.firstChild) {
+        output.removeChild(output.firstChild);
+        lineCount--;
+      }
+
+      if (autoScroll.checked) {
+        output.scrollTop = output.scrollHeight;
+      }
+    };
+
+    es.onerror = function() {
+      es.close();
+      // Reconnect after 3 seconds.
+      setTimeout(connect, 3000);
+    };
+  }
+
+  connect();
+})();
+</script>
+{{end}}

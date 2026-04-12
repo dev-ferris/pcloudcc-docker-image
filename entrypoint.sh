@@ -13,6 +13,7 @@ set -eu
 : "${UID:=1000}"
 : "${GID:=1000}"
 : "${MOUNT_TIMEOUT:=120}"
+: "${SHARED_DIR:=/pcloud-shared}"
 
 # --- Validation ---
 if [ -z "${PCLOUD_USER}" ]; then
@@ -28,6 +29,21 @@ case "${GID}" in
 esac
 
 # --- Helpers ---
+
+# Check if the shared directory is available (mounted as a volume).
+shared_available() {
+  [ -d "${SHARED_DIR}" ] && [ -w "${SHARED_DIR}" ]
+}
+
+# Write the status file atomically. No-op if shared dir is unavailable.
+write_status() {
+  shared_available || return 0
+  printf '{"state":"%s","pid":%d,"mounted":%s,"started_at":"%s"}\n' \
+    "$1" "${2:-0}" "${3:-false}" "${4:-}" \
+    > "${SHARED_DIR}/status.json.tmp"
+  mv "${SHARED_DIR}/status.json.tmp" "${SHARED_DIR}/status.json"
+}
+
 wait_for_mount() {
   echo "[$2] Waiting for mount at $1 (timeout: ${MOUNT_TIMEOUT}s)..."
   _elapsed=0
@@ -45,6 +61,16 @@ wait_for_mount() {
 cleanup() {
   trap - TERM INT EXIT
   echo "Shutting down..."
+
+  # Signal stopped to webui sidecar.
+  write_status "stopped"
+
+  if [ -n "${STATUS_LOOP_PID:-}" ]; then
+    kill "${STATUS_LOOP_PID}" 2>/dev/null || true
+  fi
+  if [ -n "${LOG_TAIL_PID:-}" ]; then
+    kill "${LOG_TAIL_PID}" 2>/dev/null || true
+  fi
 
   if [ -n "${BINDFS_PID:-}" ]; then
     kill "${BINDFS_PID}" 2>/dev/null || true
@@ -76,15 +102,121 @@ chown -R "${USER}:${GROUP}" "${PCLOUD_MOUNT}"
 
 # --- First-time login ---
 if [ ! -f /root/.pcloud/data.db ]; then
-  echo "No saved credentials found. Run the following inside the container:"
-  echo "  pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s${PCLOUD_2FA:+ -t ${PCLOUD_2FA}}"
-  exec sleep infinity
+  echo "No saved credentials found."
+
+  if shared_available; then
+    write_status "setup_required"
+    echo "Waiting for login via webui (${SHARED_DIR}) or CLI..."
+    echo "  CLI: docker exec -it <container> pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s${PCLOUD_2FA:+ -t ${PCLOUD_2FA}}"
+
+    # Poll for login request from webui sidecar.
+    while [ ! -f /root/.pcloud/data.db ]; do
+      if [ -f "${SHARED_DIR}/login-trigger" ]; then
+        echo "[webui] Login request received."
+
+        # Read credentials from shared volume.
+        _email=""
+        _pass_file=""
+        _tfa_flag=""
+
+        if [ -f "${SHARED_DIR}/login-email" ]; then
+          _email=$(cat "${SHARED_DIR}/login-email")
+        fi
+        _pass_file="${SHARED_DIR}/login-pass"
+
+        if [ -f "${SHARED_DIR}/login-2fa" ]; then
+          _tfa_code=$(cat "${SHARED_DIR}/login-2fa")
+          if [ -n "${_tfa_code}" ]; then
+            _tfa_flag="-t ${_tfa_code}"
+          fi
+        fi
+
+        # Clean up trigger immediately to prevent re-execution.
+        rm -f "${SHARED_DIR}/login-trigger"
+
+        # Attempt login. pcloudcc -p reads password from stdin.
+        _login_ok="no"
+        if [ -n "${_email}" ] && [ -f "${_pass_file}" ]; then
+          echo "[webui] Attempting pcloudcc login for ${_email}..."
+          # shellcheck disable=SC2086
+          if pcloudcc -u "${_email}" -m "${PCLOUD_MOUNT}" -p -s ${_tfa_flag} \
+               < "${_pass_file}" > "${SHARED_DIR}/login-output.log" 2>&1; then
+            _login_ok="yes"
+          fi
+
+          # Check if data.db was actually created (the real success indicator).
+          if [ -f /root/.pcloud/data.db ]; then
+            _login_ok="yes"
+          fi
+        else
+          echo "[webui] ERROR: Missing email or password file." >&2
+        fi
+
+        # Shred credential files.
+        rm -f "${SHARED_DIR}/login-pass" "${SHARED_DIR}/login-email" \
+              "${SHARED_DIR}/login-2fa"
+
+        # Write result for the sidecar to pick up.
+        if [ "${_login_ok}" = "yes" ]; then
+          echo "[webui] Login successful."
+          printf 'ok' > "${SHARED_DIR}/login-result"
+          break
+        else
+          _err="Login failed."
+          if [ -f "${SHARED_DIR}/login-output.log" ]; then
+            _err=$(cat "${SHARED_DIR}/login-output.log")
+          fi
+          echo "[webui] Login failed: ${_err}" >&2
+          printf '%s' "${_err}" > "${SHARED_DIR}/login-result"
+          rm -f "${SHARED_DIR}/login-output.log"
+        fi
+      fi
+      sleep 2
+    done
+  else
+    # No shared dir available — fall back to original CLI-only flow.
+    echo "Run the following inside the container:"
+    echo "  pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s${PCLOUD_2FA:+ -t ${PCLOUD_2FA}}"
+    exec sleep infinity
+  fi
+
+  # If we get here without data.db, something went wrong.
+  if [ ! -f /root/.pcloud/data.db ]; then
+    echo "ERROR: Login completed but data.db not found." >&2
+    exit 1
+  fi
 fi
 
 # --- Start pcloudcc daemon ---
+_start_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 echo "Starting pCloud command client"
-pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
-PCLOUD_PID=$!
+
+if shared_available; then
+  # Redirect pcloudcc output to log file for the webui sidecar,
+  # and also tee to stdout so `docker logs` still works.
+  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" \
+    > "${SHARED_DIR}/pcloudcc.log" 2>&1 &
+  PCLOUD_PID=$!
+
+  # Tail the log file to stdout so `docker logs` still works.
+  tail -f "${SHARED_DIR}/pcloudcc.log" 2>/dev/null &
+  LOG_TAIL_PID=$!
+
+  # Background status writer — updates status.json every 5 seconds.
+  (
+    while kill -0 "${PCLOUD_PID}" 2>/dev/null; do
+      _mounted="false"
+      mountpoint -q "${PCLOUD_MOUNT}" 2>/dev/null && _mounted="true"
+      write_status "running" "${PCLOUD_PID}" "${_mounted}" "${_start_time}"
+      sleep 5
+    done
+    write_status "stopped"
+  ) &
+  STATUS_LOOP_PID=$!
+else
+  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
+  PCLOUD_PID=$!
+fi
 
 # --- Optional crypto unlock ---
 if [ -n "${PCLOUD_CRYPT}" ]; then

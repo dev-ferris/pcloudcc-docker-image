@@ -1,5 +1,6 @@
 volumes:
   pconfig: {}
+  pcloud-shared: {}
 
 services:
   pcloud:
@@ -10,6 +11,7 @@ services:
     restart: unless-stopped
     volumes:
       - pconfig:/root/.pcloud:rw
+      - pcloud-shared:/pcloud-shared:rw
       - /path/to/your/pcloud:/pcloud:rshared
     env_file:
       - .env
@@ -28,3 +30,23 @@ services:
       - SYS_ADMIN
     stdin_open: true
     tty: true
+
+  webui:
+    build:
+      context: ./webui
+    restart: unless-stopped
+    volumes:
+      - pconfig:/pcloud-config:ro
+      - pcloud-shared:/pcloud-shared:rw
+    ports:
+      - "${WEBUI_PORT:-8080}:8080"
+    environment:
+      - WEBUI_USER=${WEBUI_USER:-admin}
+      - WEBUI_PASS=${WEBUI_PASS:?WEBUI_PASS is required — set it in .env}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - pcloud

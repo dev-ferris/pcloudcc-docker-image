@@ -21,3 +21,21 @@ updates:
     commit-message:
       prefix: "build"
       include: "scope"
+
+  # Keep the webui sidecar Dockerfile base image up to date.
+  - package-ecosystem: "docker"
+    directory: "/webui"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build(webui)"
+      include: "scope"
+
+  # Keep Go module dependencies up to date (webui sidecar).
+  - package-ecosystem: "gomod"
+    directory: "/webui"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps(webui)"
+      include: "scope"

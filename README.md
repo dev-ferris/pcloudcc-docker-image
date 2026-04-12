@@ -27,6 +27,7 @@ This project is essentially a Docker packaging layer. All the real work happens 
 - Built-in `bindfs` for UID/GID remapping (useful on NAS setups)
 - Healthcheck included
 - POSIX-compliant entrypoint script with graceful shutdown
+- **Web UI sidecar** for first-time login, live logs, and status monitoring
 - Compatible environment variables with the `DjSni/docker-image-pCloud` setup
 
 ## Quick start
@@ -158,6 +159,27 @@ From now on, the container will start automatically without manual intervention.
 | `BINDFS_TARGET` | No | `/pcloud` | Target path for bindfs overlay |
 | `UID` | No | `1000` | User ID for bindfs remapping |
 | `GID` | No | `1000` | Group ID for bindfs remapping |
+
+### Web UI sidecar
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `WEBUI_PASS` | Yes | — | Password for the web UI (HTTP Basic Auth) |
+| `WEBUI_USER` | No | `admin` | Username for the web UI |
+| `WEBUI_PORT` | No | `8080` | Host port the web UI listens on |
+| `WEBUI_TLS` | No | `false` | Set to `true` for self-signed TLS |
+
+## Web UI
+
+The included sidecar container (`webui` service in `docker-compose.yml`) provides a lightweight web dashboard:
+
+- **Status** (`/`) — connection state, mount status, PID, uptime
+- **Logs** (`/logs`) — real-time pcloudcc log viewer with Server-Sent Events
+- **Setup** (`/setup`) — browser-based first-time login (replaces the manual `docker exec` flow)
+
+The sidecar communicates with the pcloudcc container exclusively via shared volumes — no Docker socket access, no elevated privileges. Credentials entered in the setup form are written to a temporary file (mode `0600`), used once by the entrypoint, and immediately deleted.
+
+After starting with `docker compose up -d`, open `http://<host>:8080` and log in with your `WEBUI_USER` / `WEBUI_PASS` credentials.
 
 ## How it works
 
