@@ -38,8 +38,8 @@ shared_available() {
 # Write the status file atomically. No-op if shared dir is unavailable.
 write_status() {
   shared_available || return 0
-  printf '{"state":"%s","pid":%d,"mounted":%s,"started_at":"%s"}\n' \
-    "$1" "${2:-0}" "${3:-false}" "${4:-}" \
+  printf '{"state":"%s","pid":%d,"mounted":%s,"started_at":"%s","crypto_unlocked":%s}\n' \
+    "$1" "${2:-0}" "${3:-false}" "${4:-}" "${5:-false}" \
     > "${SHARED_DIR}/status.json.tmp"
   mv "${SHARED_DIR}/status.json.tmp" "${SHARED_DIR}/status.json"
 }
@@ -203,14 +203,46 @@ if shared_available; then
   LOG_TAIL_PID=$!
 
   # Background status writer — updates status.json every 5 seconds.
+  # Also watches for crypto unlock requests from the webui sidecar.
+  # Crypto state is tracked via a marker file (.crypto-unlocked) so that
+  # both env-var unlocks (parent shell) and webui unlocks (this subshell)
+  # are visible.
   (
     while kill -0 "${PCLOUD_PID}" 2>/dev/null; do
       _mounted="false"
       mountpoint -q "${PCLOUD_MOUNT}" 2>/dev/null && _mounted="true"
-      write_status "running" "${PCLOUD_PID}" "${_mounted}" "${_start_time}"
+      _crypto="false"
+      [ -f "${SHARED_DIR}/.crypto-unlocked" ] && _crypto="true"
+      write_status "running" "${PCLOUD_PID}" "${_mounted}" "${_start_time}" "${_crypto}"
+
+      # --- Crypto unlock watcher (webui) ---
+      if [ -f "${SHARED_DIR}/crypto-trigger" ]; then
+        echo "[webui] Crypto unlock request received."
+        rm -f "${SHARED_DIR}/crypto-trigger"
+
+        if [ -f "${SHARED_DIR}/crypto-pass" ]; then
+          _cpass=$(cat "${SHARED_DIR}/crypto-pass")
+          rm -f "${SHARED_DIR}/crypto-pass"
+
+          if printf 'crypto start %s\n' "${_cpass}" \
+               | pcloudcc -u "${PCLOUD_USER}" -k > /dev/null 2>&1; then
+            touch "${SHARED_DIR}/.crypto-unlocked"
+            echo "[webui] Crypto folder unlocked."
+            printf 'ok' > "${SHARED_DIR}/crypto-result"
+          else
+            echo "[webui] Crypto unlock failed." >&2
+            printf 'Crypto unlock failed. Check your password.' > "${SHARED_DIR}/crypto-result"
+          fi
+          unset _cpass
+        else
+          echo "[webui] ERROR: Missing crypto-pass file." >&2
+          printf 'Missing crypto password.' > "${SHARED_DIR}/crypto-result"
+        fi
+      fi
+
       sleep 5
     done
-    write_status "stopped"
+    write_status "stopped" "0" "false" "${_start_time}" "false"
   ) &
   STATUS_LOOP_PID=$!
 else
@@ -218,12 +250,15 @@ else
   PCLOUD_PID=$!
 fi
 
-# --- Optional crypto unlock ---
+# --- Optional crypto unlock (env var) ---
 if [ -n "${PCLOUD_CRYPT}" ]; then
-  echo "Crypto password: provided"
+  echo "Crypto password: provided (via environment variable)"
   wait_for_mount "${PCLOUD_MOUNT}" "pcloud"
 
-  printf 'crypto start %s\n' "${PCLOUD_CRYPT}" | pcloudcc -u "${PCLOUD_USER}" -k > /dev/null 2>&1
+  if printf 'crypto start %s\n' "${PCLOUD_CRYPT}" | pcloudcc -u "${PCLOUD_USER}" -k > /dev/null 2>&1; then
+    # Signal crypto state to the status writer subshell via marker file.
+    shared_available && touch "${SHARED_DIR}/.crypto-unlocked"
+  fi
   unset PCLOUD_CRYPT
 
   echo "Crypto folder unlock requested."

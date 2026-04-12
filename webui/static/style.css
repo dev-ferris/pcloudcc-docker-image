@@ -220,6 +220,19 @@ footer {
   word-break: break-all;
 }
 
+/* --- Crypto section --- */
+
+.crypto-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.crypto-section h2 {
+  font-size: 1.15rem;
+  margin-bottom: 0.5rem;
+}
+
 /* --- Setup form --- */
 
 .setup-form {

@@ -12,6 +12,12 @@
 </div>
 {{end}}
 
+{{if .CryptoMessage}}
+<div class="banner {{if .CryptoSuccess}}banner-success{{else}}banner-error{{end}}">
+  {{.CryptoMessage}}
+</div>
+{{end}}
+
 <div class="cards">
   <div class="card">
     <div class="card-label">Connection</div>
@@ -25,6 +31,17 @@
     <div class="card-label">Mount</div>
     <div class="card-value">
       {{if .Status.Mounted}}Active{{else}}Inactive{{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-label">Crypto Folder</div>
+    <div class="card-value">
+      {{if .Status.CryptoUnlocked}}
+        <span class="indicator green"></span> Unlocked
+      {{else}}
+        <span class="indicator gray"></span> Locked
+      {{end}}
     </div>
   </div>
 
@@ -43,8 +60,35 @@
   </div>
 </div>
 
+{{if and .Status.SetupDone (not .Status.CryptoUnlocked) .Status.Mounted}}
+<div class="crypto-section">
+  <h2>Unlock Crypto Folder</h2>
+  <p class="form-hint">
+    Enter your pCloud crypto password to unlock the encrypted folder.
+    This is required after every container restart.
+  </p>
+  <form method="POST" action="/crypto" class="setup-form">
+    <div class="form-group">
+      <label for="crypto_password">Crypto Password</label>
+      <input type="password" id="crypto_password" name="crypto_password" required
+             autocomplete="off">
+    </div>
+    <button type="submit" id="crypto-btn">Unlock</button>
+  </form>
+  <script>
+    document.querySelector('.crypto-section form').addEventListener('submit', function() {
+      var btn = document.getElementById('crypto-btn');
+      btn.disabled = true;
+      btn.textContent = 'Unlocking...';
+    });
+  </script>
+</div>
+{{end}}
+
 <script>
-  // Auto-refresh status every 10 seconds.
+  // Auto-refresh status every 10 seconds (only if no form interaction).
+  {{if not .CryptoMessage}}
   setTimeout(function() { location.reload(); }, 10000);
+  {{end}}
 </script>
 {{end}}

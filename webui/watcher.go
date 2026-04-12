@@ -15,11 +15,12 @@ import (
 // Status represents the current state of the pcloudcc container,
 // read from the shared status.json file.
 type Status struct {
-	State     string `json:"state"`      // "setup_required", "running", "stopped"
-	PID       int    `json:"pid"`        // pcloudcc process ID
-	Mounted   bool   `json:"mounted"`    // whether the FUSE mount is active
-	StartedAt string `json:"started_at"` // ISO 8601 timestamp
-	SetupDone bool   `json:"-"`          // derived: data.db exists
+	State          string `json:"state"`            // "setup_required", "running", "stopped"
+	PID            int    `json:"pid"`              // pcloudcc process ID
+	Mounted        bool   `json:"mounted"`          // whether the FUSE mount is active
+	StartedAt      string `json:"started_at"`       // ISO 8601 timestamp
+	CryptoUnlocked bool   `json:"crypto_unlocked"`  // whether the crypto folder is unlocked
+	SetupDone      bool   `json:"-"`                // derived: data.db exists
 }
 
 type StatusWatcher struct {
@@ -276,4 +277,55 @@ func (sm *SetupManager) PollResult(timeout time.Duration) (string, bool) {
 
 	log.Println("Login result poll timed out")
 	return "Timeout waiting for login result. Check container logs.", false
+}
+
+// --- Crypto Manager ---
+
+// CryptoManager handles the file-based crypto unlock protocol
+// with the pcloudcc container.
+type CryptoManager struct {
+	sharedDir string
+}
+
+func NewCryptoManager(sharedDir string) *CryptoManager {
+	return &CryptoManager{sharedDir: sharedDir}
+}
+
+// RequestUnlock writes the crypto password and trigger for the entrypoint to pick up.
+func (cm *CryptoManager) RequestUnlock(password string) error {
+	if err := os.MkdirAll(cm.sharedDir, 0o755); err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(filepath.Join(cm.sharedDir, "crypto-pass"), []byte(password), 0o600); err != nil {
+		return err
+	}
+
+	// Remove stale result.
+	os.Remove(filepath.Join(cm.sharedDir, "crypto-result"))
+
+	// Write trigger last.
+	return os.WriteFile(filepath.Join(cm.sharedDir, "crypto-trigger"), []byte("1"), 0o644)
+}
+
+// PollResult waits for the crypto result file to appear.
+func (cm *CryptoManager) PollResult(timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	resultPath := filepath.Join(cm.sharedDir, "crypto-result")
+
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(resultPath)
+		if err == nil {
+			result := string(data)
+			os.Remove(resultPath)
+			if result == "ok" || result == "ok\n" {
+				return "Crypto folder unlocked successfully.", true
+			}
+			return result, false
+		}
+		time.Sleep(time.Second)
+	}
+
+	log.Println("Crypto result poll timed out")
+	return "Timeout waiting for crypto unlock result. Check container logs.", false
 }

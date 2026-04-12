@@ -156,6 +156,61 @@ func escapeSSE(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", " "), "\n", " ")
 }
 
+// CryptoUnlockHandler processes the crypto password form submission.
+func CryptoUnlockHandler(cm *CryptoManager, sw *StatusWatcher) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s := sw.Get()
+		if s.CryptoUnlocked {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		if s.State != "running" || !s.Mounted {
+			renderCryptoResult(w, sw, "pcloudcc must be running and mounted before unlocking crypto.", false)
+			return
+		}
+
+		if err := r.ParseForm(); err != nil {
+			renderCryptoResult(w, sw, "Invalid form data.", false)
+			return
+		}
+
+		password := r.FormValue("crypto_password")
+		if password == "" {
+			renderCryptoResult(w, sw, "Crypto password is required.", false)
+			return
+		}
+
+		if err := cm.RequestUnlock(password); err != nil {
+			log.Printf("Crypto unlock request error: %v", err)
+			renderCryptoResult(w, sw, "Failed to submit crypto unlock request.", false)
+			return
+		}
+
+		result, ok := cm.PollResult(30 * time.Second)
+		renderCryptoResult(w, sw, result, ok)
+	})
+}
+
+func renderCryptoResult(w http.ResponseWriter, sw *StatusWatcher, message string, success bool) {
+	s := sw.Get()
+	// Force-refresh crypto state if unlock succeeded.
+	if success {
+		s.CryptoUnlocked = true
+	}
+	data := map[string]any{
+		"Status":        s,
+		"StateCSS":      stateCSS(s.State),
+		"StateText":     stateText(s.State, s.Mounted),
+		"Active":        "status",
+		"CryptoMessage": message,
+		"CryptoSuccess": success,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.ExecuteTemplate(w, "status.html", data); err != nil {
+		log.Printf("Template error: %v", err)
+	}
+}
+
 func stateCSS(state string) string {
 	switch state {
 	case "running":

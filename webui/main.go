@@ -70,6 +70,7 @@ func main() {
 	go logTailer.Run()
 
 	setupMgr := NewSetupManager(cfg.SharedDir, cfg.ConfigDir)
+	cryptoMgr := NewCryptoManager(cfg.SharedDir)
 
 	// Set up routes.
 	mux := http.NewServeMux()
@@ -77,6 +78,7 @@ func main() {
 	auth := BasicAuth(cfg.User, cfg.Pass)
 
 	mux.Handle("GET /", auth(StatusHandler(statusWatcher)))
+	mux.Handle("POST /crypto", auth(CryptoUnlockHandler(cryptoMgr, statusWatcher)))
 	mux.Handle("GET /logs", auth(LogsPageHandler()))
 	mux.Handle("GET /api/logs/stream", auth(LogsStreamHandler(logTailer)))
 	mux.Handle("GET /setup", auth(SetupPageHandler(statusWatcher)))
