@@ -44,7 +44,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev1 \
     libmbedtls21 \
     libmbedcrypto16 \
-    libmbedx509-7 \
     libboost-system1.83.0 \
     libboost-program-options1.83.0 \
     libreadline8t64 \
