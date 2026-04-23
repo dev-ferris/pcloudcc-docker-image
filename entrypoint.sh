@@ -77,7 +77,9 @@ chown -R "${USER}:${GROUP}" "${PCLOUD_MOUNT}"
 # --- First-time login ---
 if [ ! -f /root/.pcloud/data.db ]; then
   echo "No saved credentials found. Run the following inside the container:"
-  echo "  pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s${PCLOUD_2FA:+ -t ${PCLOUD_2FA}}"
+  _2fa_hint="${PCLOUD_2FA:+ -t <2FA-TOKEN>}"
+  echo "  pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s${_2fa_hint}"
+  unset _2fa_hint
   exec sleep infinity
 fi
 

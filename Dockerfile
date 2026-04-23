@@ -62,7 +62,12 @@ ENV PCLOUD_USER="" \
     PCLOUD_CRYPT="" \
     PCLOUD_MOUNT="/pcloud_internal" \
     ENABLE_BINDFS="0" \
-    BINDFS_TARGET="/pcloud"
+    BINDFS_TARGET="/pcloud" \
+    UID="1000" \
+    GID="1000" \
+    USER="nobody" \
+    GROUP="users" \
+    MOUNT_TIMEOUT="120"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD if [ "${ENABLE_BINDFS}" = "1" ]; then \
