@@ -16,8 +16,11 @@ jobs:
     steps:
       - name: Get upstream latest commit SHA
         id: upstream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SHA=$(curl -sf "https://api.github.com/repos/lneely/pcloudcc-lneely/commits/main" \
+          SHA=$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/lneely/pcloudcc-lneely/commits/main" \
             | jq -r '.sha')
           if [ -z "${SHA}" ] || [ "${SHA}" = "null" ]; then
             echo "ERROR: Failed to fetch upstream commit SHA" >&2
@@ -55,9 +58,12 @@ jobs:
     steps:
       - name: Get upstream latest tag
         id: upstream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # /tags returns the most recently created tag first.
           TAG=$(curl -sf -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             "https://api.github.com/repos/lneely/pcloudcc-lneely/tags?per_page=1" \
             | jq -r '.[0].name // empty')
           if [ -z "${TAG}" ]; then

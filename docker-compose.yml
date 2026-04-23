@@ -26,5 +26,6 @@ services:
       - /dev/fuse
     cap_add:
       - SYS_ADMIN
+    # Required for first-time interactive login; can be removed after initial credential setup.
     stdin_open: true
     tty: true
