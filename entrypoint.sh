@@ -26,6 +26,12 @@ esac
 case "${GID}" in
   ''|*[!0-9]*) echo "ERROR: GID must be numeric, got '${GID}'" >&2; exit 1 ;;
 esac
+case "${USER}" in
+  ''|*[!a-zA-Z0-9._-]*) echo "ERROR: USER contains invalid characters, got '${USER}'" >&2; exit 1 ;;
+esac
+case "${GROUP}" in
+  ''|*[!a-zA-Z0-9._-]*) echo "ERROR: GROUP contains invalid characters, got '${GROUP}'" >&2; exit 1 ;;
+esac
 
 # --- Helpers ---
 wait_for_mount() {
@@ -107,7 +113,7 @@ if [ "${ENABLE_BINDFS}" = "1" ]; then
   (
     wait_for_mount "${PCLOUD_MOUNT}" "bindfs"
     echo "[bindfs] Mounting ${PCLOUD_MOUNT} -> ${BINDFS_TARGET} (uid=${UID}, gid=${GID})"
-    bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
+    exec bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
   ) &
   BINDFS_PID=$!
 fi
