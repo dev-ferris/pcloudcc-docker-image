@@ -19,6 +19,7 @@ services:
     tmpfs:
       - /tmp
       - /run
+      - /pcloud_internal
     security_opt:
       - apparmor:unconfined
       - no-new-privileges:true
