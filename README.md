@@ -60,16 +60,23 @@ services:
     tmpfs:
       - /tmp
       - /run
+      - /pcloud_internal
     security_opt:
       - apparmor:unconfined
       - no-new-privileges:true
     devices:
       - /dev/fuse
+    cap_drop:
+      - ALL
     cap_add:
-      - SYS_ADMIN
+      - SYS_ADMIN    # FUSE mount/umount
+      - CHOWN        # entrypoint chowns the internal mount point
     stdin_open: true
     tty: true
 ```
+
+> **Note:** `/pcloud_internal` must be in the `tmpfs` list when `read_only: true` is used, otherwise the entrypoint can't create or chown the mount point.
+> Once first-time login is complete, remove `stdin_open` and `tty` to reduce the interactive attack surface.
 
 Then jump straight to [step 2](#2-create-your-env-file).
 
@@ -129,16 +136,17 @@ You'll see something like:
 
 ```
 No saved credentials found. Run the following inside the container:
-  pcloudcc -u your@email.com -m /pcloud_internal -p -s
+  docker exec -it <container> pcloudcc -u your@email.com -m /pcloud_internal -p -s
+After 'status is READY' appears, press Ctrl+C and restart the container.
 ```
 
-Run that command interactively:
+Run that command (substituting your container name, e.g. `pcloud`):
 
 ```bash
 docker exec -it pcloud pcloudcc -u your@email.com -m /pcloud_internal -p -s
 ```
 
-Enter your password when prompted. If you have 2FA enabled, add `-t` to the command. Once you see `status is READY`, press `Ctrl+C` and restart the container:
+Enter your password when prompted. If you have 2FA enabled, append `-t <code>` with a fresh code from your authenticator app (codes expire every ~30s, so don't reuse `PCLOUD_2FA`). Once you see `status is READY`, press `Ctrl+C` and restart the container:
 
 ```bash
 docker compose restart pcloud
@@ -161,7 +169,7 @@ From now on, the container will start automatically without manual intervention.
 | `GID` | No | `1000` | Group ID for bindfs remapping |
 | `USER` | No | `nobody` | Username that owns the internal mount point |
 | `GROUP` | No | `users` | Group that owns the internal mount point |
-| `MOUNT_TIMEOUT` | No | `120` | Seconds to wait for a mount to become ready |
+| `MOUNT_TIMEOUT` | No | `60` | Seconds to wait for a mount to become ready (raise to 120+ on slow ARM devices or high-latency links) |
 
 ## How it works
 
@@ -172,7 +180,7 @@ When `ENABLE_BINDFS=1` (the default in the compose file), the container mounts t
 
 The `/pcloud` path is then shared to the host via the `rshared` volume mount, so files appear with the correct ownership on your host system.
 
-If you don't need UID/GID remapping, set `ENABLE_BINDFS=0` and mount `/pcloud_internal` directly to the host.
+If you don't need UID/GID remapping, set `ENABLE_BINDFS=0` **and** change the host bind mount in `docker-compose.yml` from `:/pcloud:rshared` to `:/pcloud_internal:rshared` (and drop the `/pcloud_internal` entry from `tmpfs` — otherwise the host mount would be shadowed by the tmpfs and data would not persist).
 
 ## Security considerations
 
@@ -184,7 +192,7 @@ To limit the blast radius:
 
 - `no-new-privileges:true` prevents privilege escalation via setuid/setgid binaries.
 - `read_only: true` makes the root filesystem read-only; only the named volume and tmpfs mounts are writable.
-- `CAP_SYS_ADMIN` is the only added capability; all others remain at Docker's defaults.
+- All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) and `CHOWN` (internal mount-point ownership) are re-added.
 
 A custom AppArmor profile that restricts the allowed syscalls to exactly those needed by FUSE would further reduce the attack surface but is not included here, as profiles are host-specific.
 
@@ -225,7 +233,7 @@ The compose file enables `stdin_open: true` and `tty: true` so you can attach to
 
 The image is built from the `lneely/pcloudcc-lneely` upstream. The `check-upstream.yml` workflow polls the upstream `main` branch every 6 hours and triggers an automatic rebuild on new commits. Every published image is:
 
-- Scanned with Trivy (CRITICAL/HIGH/MEDIUM CVEs reported to the GitHub Security tab)
+- Scanned with Trivy — CRITICAL/HIGH CVEs with an available fix block the build; the scan results (including informational findings) are uploaded to the GitHub Security tab
 - Signed with cosign keyless signing (verifiable via `cosign verify`)
 - Shipped with an SBOM and provenance attestation
 

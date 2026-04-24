@@ -25,8 +25,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-RUN git clone --depth 1 --branch "${PCLOUDCC_REF}" \
-        https://github.com/lneely/pcloudcc-lneely.git . \
+# Use `git fetch` instead of `git clone --branch` so PCLOUDCC_REF can be a
+# branch, tag, or a full commit SHA (as documented in README.md). GitHub allows
+# fetching arbitrary SHAs via uploadpack.allowReachableSHA1InWant.
+RUN git init -q \
+    && git fetch --depth 1 \
+        https://github.com/lneely/pcloudcc-lneely.git "${PCLOUDCC_REF}" \
+    && git checkout -q FETCH_HEAD \
     && make \
     && strip pcloudcc
 
@@ -70,10 +75,12 @@ ENV PCLOUD_USER="" \
     GID="1000" \
     USER="nobody" \
     GROUP="users" \
-    MOUNT_TIMEOUT="120"
+    MOUNT_TIMEOUT="60"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD if [ "${ENABLE_BINDFS}" = "1" ]; then \
+    CMD if [ ! -f /root/.pcloud/data.db ]; then \
+          exit 0; \
+        elif [ "${ENABLE_BINDFS}" = "1" ]; then \
           mountpoint -q "${BINDFS_TARGET}" && [ -n "$(ls -A "${BINDFS_TARGET}" 2>/dev/null)" ]; \
         else \
           mountpoint -q "${PCLOUD_MOUNT}" && [ -n "$(ls -A "${PCLOUD_MOUNT}" 2>/dev/null)" ]; \

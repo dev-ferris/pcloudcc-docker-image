@@ -13,7 +13,7 @@ set -eu
 : "${BINDFS_TARGET:=/pcloud}"
 : "${UID:=1000}"
 : "${GID:=1000}"
-: "${MOUNT_TIMEOUT:=120}"
+: "${MOUNT_TIMEOUT:=60}"
 
 # --- Validation ---
 if [ -z "${PCLOUD_USER}" ]; then
@@ -33,6 +33,34 @@ esac
 case "${GROUP}" in
   ''|*[!a-zA-Z0-9._-]*) echo "ERROR: GROUP contains invalid characters, got '${GROUP}'" >&2; exit 1 ;;
 esac
+
+# Guard against typos that would make the recursive chown below disastrous.
+# Both mount paths must be absolute and must not be the root filesystem or a
+# well-known system directory.
+validate_mount_path() {
+  _name="$1"
+  _path="$2"
+  case "${_path}" in
+    ""|"/")
+      echo "ERROR: ${_name}='${_path}' must not be empty or '/'" >&2; exit 1 ;;
+    /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+      echo "ERROR: ${_name}='${_path}' is a top-level system directory; refusing to chown -R there" >&2; exit 1 ;;
+    /*)
+      case "${_path}" in
+        *..*) echo "ERROR: ${_name}='${_path}' must not contain '..'" >&2; exit 1 ;;
+      esac
+      ;;
+    *)
+      echo "ERROR: ${_name}='${_path}' must be an absolute path" >&2; exit 1 ;;
+  esac
+}
+validate_mount_path PCLOUD_MOUNT "${PCLOUD_MOUNT}"
+if [ "${ENABLE_BINDFS}" = "1" ]; then
+  validate_mount_path BINDFS_TARGET "${BINDFS_TARGET}"
+  if [ "${BINDFS_TARGET}" = "${PCLOUD_MOUNT}" ]; then
+    echo "ERROR: BINDFS_TARGET must differ from PCLOUD_MOUNT" >&2; exit 1
+  fi
+fi
 
 # --- Helpers ---
 wait_for_mount() {
@@ -103,9 +131,12 @@ fi
 # --- First-time login ---
 if [ ! -f /root/.pcloud/data.db ]; then
   echo "No saved credentials found. Run the following inside the container:"
-  _2fa_hint="${PCLOUD_2FA:+ -t <2FA-TOKEN>}"
-  echo "  pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s${_2fa_hint}"
-  unset _2fa_hint
+  echo "  docker exec -it <container> pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s"
+  if [ -n "${PCLOUD_2FA}" ]; then
+    echo "  (2FA is enabled — append '-t <code>' with a fresh code from your authenticator app;"
+    echo "   codes expire every ~30s, so don't reuse PCLOUD_2FA here.)"
+  fi
+  echo "After 'status is READY' appears, press Ctrl+C and restart the container."
   exec sleep infinity
 fi
 
@@ -115,14 +146,25 @@ pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
 PCLOUD_PID=$!
 
 # --- Optional crypto unlock ---
+# A failed unlock (e.g. wrong password) must not abort the entrypoint and take
+# the pcloudcc daemon down with it — log the failure and keep going.
 if [ -n "${PCLOUD_CRYPT}" ]; then
   echo "Crypto password: provided"
-  wait_for_mount "${PCLOUD_MOUNT}" "pcloud"
-
-  printf 'crypto start %s\n' "${PCLOUD_CRYPT}" | pcloudcc -u "${PCLOUD_USER}" -k > /dev/null 2>&1
+  if wait_for_mount "${PCLOUD_MOUNT}" "pcloud"; then
+    _crypto_log=$(mktemp)
+    if printf 'crypto start %s\n' "${PCLOUD_CRYPT}" \
+         | pcloudcc -u "${PCLOUD_USER}" -k > "${_crypto_log}" 2>&1; then
+      echo "Crypto folder unlock requested."
+    else
+      echo "WARNING: crypto unlock command failed (wrong password?). pcloudcc keeps running." >&2
+      sed 's/^/  pcloudcc: /' "${_crypto_log}" >&2 || true
+    fi
+    rm -f "${_crypto_log}"
+    unset _crypto_log
+  else
+    echo "WARNING: skipping crypto unlock — pcloud mount did not become ready." >&2
+  fi
   unset PCLOUD_CRYPT
-
-  echo "Crypto folder unlock requested."
 fi
 
 # Clear 2FA code from environment after startup
