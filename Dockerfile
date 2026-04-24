@@ -54,6 +54,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p /pcloud_internal
+
 COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 

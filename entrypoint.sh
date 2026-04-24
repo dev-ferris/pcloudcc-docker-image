@@ -84,9 +84,19 @@ if [ -n "${PCLOUD_CRYPT_FILE}" ]; then
 fi
 
 # --- Setup ---
-mkdir -p "${PCLOUD_MOUNT}"
-echo "Setting owner rights (${USER}:${GROUP} to ${PCLOUD_MOUNT})"
-chown -R "${USER}:${GROUP}" "${PCLOUD_MOUNT}"
+# With read_only: true the container FS is immutable; /pcloud_internal must be
+# listed under tmpfs (or pre-created in the image) so mkdir/chown can succeed.
+if ! mkdir -p "${PCLOUD_MOUNT}" 2>/dev/null; then
+  echo "ERROR: Cannot create mount point '${PCLOUD_MOUNT}'." >&2
+  echo "       When using read_only: true, add '${PCLOUD_MOUNT}' to the tmpfs list in docker-compose.yml." >&2
+  exit 1
+fi
+if chown -R "${USER}:${GROUP}" "${PCLOUD_MOUNT}" 2>/dev/null; then
+  echo "Setting owner rights (${USER}:${GROUP}) on ${PCLOUD_MOUNT}"
+else
+  echo "WARNING: Could not set ownership on '${PCLOUD_MOUNT}' (read-only filesystem?)." >&2
+  echo "         Add '${PCLOUD_MOUNT}' to the tmpfs list in docker-compose.yml." >&2
+fi
 
 [ -n "${PCLOUD_2FA}" ] && echo "2FA code: provided"
 
