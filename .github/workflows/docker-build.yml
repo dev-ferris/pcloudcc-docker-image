@@ -112,13 +112,48 @@ jobs:
             type=schedule,pattern=nightly
             type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' }}
 
-      - name: Build and push
+      # Build linux/amd64 locally so Trivy can gate on it before anything is
+      # published. Multi-platform builds can't be loaded into the local daemon,
+      # so we build amd64-only here and export to a tar archive.
+      - name: Build linux/amd64 for vulnerability scan
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          outputs: type=docker,dest=/tmp/scan-image.tar
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
+          # Read from the shared cache; don't write — the full multi-platform
+          # build below will update it.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+
+      # Gate: fail the build before any push if CRITICAL or HIGH unfixed CVEs
+      # are found. Runs on every event including pull_requests so PRs are also
+      # blocked. The SARIF file is written regardless of exit code so the
+      # upload step below can always pick it up.
+      - name: Run Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          input: /tmp/scan-image.tar
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+      # Full multi-platform build and push. Runs only after the Trivy gate
+      # passes and only on non-PR events.
+      - name: Build and push (all platforms)
         id: build
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # PCLOUDCC_REF defaults to 'main' for push/schedule/PR triggers and can be
@@ -128,10 +163,10 @@ jobs:
             PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
           provenance: mode=max
           sbom: true
-          # Registry-backed cache shared across runs. cache-to is gated on non-PR
-          # because writing requires GHCR auth, which we only perform on push events.
+          # BuildKit reuses layers from the scan build above (same daemon),
+          # so this is effectively just the push, not a full rebuild.
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Install Cosign
         if: github.event_name != 'pull_request'
@@ -149,16 +184,6 @@ jobs:
             echo "Signing ${tag}@${DIGEST}"
             cosign sign --yes "${tag}@${DIGEST}"
           done <<< "$TAGS"
-
-      - name: Run Trivy vulnerability scanner
-        if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
 
       - name: Upload Trivy scan results to GitHub Security tab
         if: always() && github.event_name != 'pull_request' && hashFiles('trivy-results.sarif') != ''

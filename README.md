@@ -153,6 +153,7 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_USER` | Yes | — | Your pCloud account email |
 | `PCLOUD_2FA` | No | — | 2FA code (only for first login) |
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
+| `PCLOUD_CRYPT_FILE` | No | — | Path to a file with the crypto password (e.g. `/run/secrets/pcloud_crypt`); takes precedence over `PCLOUD_CRYPT` |
 | `PCLOUD_MOUNT` | No | `/pcloud_internal` | Internal mount point (where pcloudcc mounts) |
 | `ENABLE_BINDFS` | No | `0` | Set to `1` to enable bindfs UID/GID remapping |
 | `BINDFS_TARGET` | No | `/pcloud` | Target path for bindfs overlay |
@@ -189,7 +190,32 @@ A custom AppArmor profile that restricts the allowed syscalls to exactly those n
 
 ### Secrets in environment variables
 
-`PCLOUD_CRYPT` (and `PCLOUD_2FA`) are passed via environment variables, which are briefly visible in `/proc/<pid>/environ` and via `docker inspect` until they are `unset` inside the entrypoint. For higher security, consider using Docker secrets (Swarm) or a bind-mounted secrets file instead of env vars.
+`PCLOUD_CRYPT` (and `PCLOUD_2FA`) are passed via environment variables, which are briefly visible in `/proc/<pid>/environ` and via `docker inspect` until they are `unset` inside the entrypoint. For higher security, use `PCLOUD_CRYPT_FILE` to point to a file (or Docker secret) that contains the password:
+
+```yaml
+# docker-compose.yml (Docker Swarm)
+secrets:
+  pcloud_crypt:
+    external: true
+
+services:
+  pcloud:
+    secrets:
+      - pcloud_crypt
+    environment:
+      - PCLOUD_CRYPT_FILE=/run/secrets/pcloud_crypt
+```
+
+Or with a plain bind-mounted file (Compose standalone):
+
+```yaml
+services:
+  pcloud:
+    volumes:
+      - ./secrets/pcloud_crypt.txt:/run/secrets/pcloud_crypt:ro
+    environment:
+      - PCLOUD_CRYPT_FILE=/run/secrets/pcloud_crypt
+```
 
 ### Interactive login and `stdin_open`/`tty`
 

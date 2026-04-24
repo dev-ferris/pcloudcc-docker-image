@@ -5,6 +5,7 @@ set -eu
 : "${PCLOUD_USER:=}"
 : "${PCLOUD_2FA:=}"
 : "${PCLOUD_CRYPT:=}"
+: "${PCLOUD_CRYPT_FILE:=}"
 : "${PCLOUD_MOUNT:=/pcloud_internal}"
 : "${USER:=nobody}"
 : "${GROUP:=users}"
@@ -72,6 +73,15 @@ cleanup() {
   fi
 }
 trap cleanup TERM INT EXIT
+
+# --- Load secrets from files (e.g. Docker secrets at /run/secrets/) ---
+if [ -n "${PCLOUD_CRYPT_FILE}" ]; then
+  if [ ! -r "${PCLOUD_CRYPT_FILE}" ]; then
+    echo "ERROR: PCLOUD_CRYPT_FILE '${PCLOUD_CRYPT_FILE}' is not readable" >&2
+    exit 1
+  fi
+  PCLOUD_CRYPT="$(cat "${PCLOUD_CRYPT_FILE}")"
+fi
 
 # --- Setup ---
 mkdir -p "${PCLOUD_MOUNT}"
