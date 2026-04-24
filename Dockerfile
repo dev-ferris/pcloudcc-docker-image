@@ -60,6 +60,7 @@ COPY --chmod=755 entrypoint.sh /entrypoint.sh
 ENV PCLOUD_USER="" \
     PCLOUD_2FA="" \
     PCLOUD_CRYPT="" \
+    PCLOUD_CRYPT_FILE="" \
     PCLOUD_MOUNT="/pcloud_internal" \
     ENABLE_BINDFS="0" \
     BINDFS_TARGET="/pcloud" \

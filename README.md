@@ -153,11 +153,15 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_USER` | Yes | — | Your pCloud account email |
 | `PCLOUD_2FA` | No | — | 2FA code (only for first login) |
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
+| `PCLOUD_CRYPT_FILE` | No | — | Path to a file with the crypto password (e.g. `/run/secrets/pcloud_crypt`); takes precedence over `PCLOUD_CRYPT` |
 | `PCLOUD_MOUNT` | No | `/pcloud_internal` | Internal mount point (where pcloudcc mounts) |
 | `ENABLE_BINDFS` | No | `0` | Set to `1` to enable bindfs UID/GID remapping |
 | `BINDFS_TARGET` | No | `/pcloud` | Target path for bindfs overlay |
 | `UID` | No | `1000` | User ID for bindfs remapping |
 | `GID` | No | `1000` | Group ID for bindfs remapping |
+| `USER` | No | `nobody` | Username that owns the internal mount point |
+| `GROUP` | No | `users` | Group that owns the internal mount point |
+| `MOUNT_TIMEOUT` | No | `120` | Seconds to wait for a mount to become ready |
 
 ## How it works
 
@@ -169,6 +173,63 @@ When `ENABLE_BINDFS=1` (the default in the compose file), the container mounts t
 The `/pcloud` path is then shared to the host via the `rshared` volume mount, so files appear with the correct ownership on your host system.
 
 If you don't need UID/GID remapping, set `ENABLE_BINDFS=0` and mount `/pcloud_internal` directly to the host.
+
+## Security considerations
+
+### Why root and SYS_ADMIN?
+
+FUSE mounts require mounting capabilities that are not available to unprivileged processes. The container therefore runs as root with `CAP_SYS_ADMIN`. This is the minimum required for `pcloudcc` and `bindfs` to create FUSE mounts inside Docker.
+
+To limit the blast radius:
+
+- `no-new-privileges:true` prevents privilege escalation via setuid/setgid binaries.
+- `read_only: true` makes the root filesystem read-only; only the named volume and tmpfs mounts are writable.
+- `CAP_SYS_ADMIN` is the only added capability; all others remain at Docker's defaults.
+
+A custom AppArmor profile that restricts the allowed syscalls to exactly those needed by FUSE would further reduce the attack surface but is not included here, as profiles are host-specific.
+
+### Secrets in environment variables
+
+`PCLOUD_CRYPT` (and `PCLOUD_2FA`) are passed via environment variables, which are briefly visible in `/proc/<pid>/environ` and via `docker inspect` until they are `unset` inside the entrypoint. For higher security, use `PCLOUD_CRYPT_FILE` to point to a file (or Docker secret) that contains the password:
+
+```yaml
+# docker-compose.yml (Docker Swarm)
+secrets:
+  pcloud_crypt:
+    external: true
+
+services:
+  pcloud:
+    secrets:
+      - pcloud_crypt
+    environment:
+      - PCLOUD_CRYPT_FILE=/run/secrets/pcloud_crypt
+```
+
+Or with a plain bind-mounted file (Compose standalone):
+
+```yaml
+services:
+  pcloud:
+    volumes:
+      - ./secrets/pcloud_crypt.txt:/run/secrets/pcloud_crypt:ro
+    environment:
+      - PCLOUD_CRYPT_FILE=/run/secrets/pcloud_crypt
+```
+
+### Interactive login and `stdin_open`/`tty`
+
+The compose file enables `stdin_open: true` and `tty: true` so you can attach to the container during first-time login. **Remove both options once credentials are saved** to `/root/.pcloud/data.db` to reduce the interactive attack surface.
+
+### Supply chain
+
+The image is built from the `lneely/pcloudcc-lneely` upstream. The `check-upstream.yml` workflow polls the upstream `main` branch every 6 hours and triggers an automatic rebuild on new commits. Every published image is:
+
+- Scanned with Trivy (CRITICAL/HIGH/MEDIUM CVEs reported to the GitHub Security tab)
+- Signed with cosign keyless signing (verifiable via `cosign verify`)
+- Shipped with an SBOM and provenance attestation
+
+To pin to a specific upstream revision, set `PCLOUDCC_REF` to a tag or commit SHA in your `docker-compose.yml` build args.
 
 ## Updating
 

@@ -5,6 +5,7 @@ set -eu
 : "${PCLOUD_USER:=}"
 : "${PCLOUD_2FA:=}"
 : "${PCLOUD_CRYPT:=}"
+: "${PCLOUD_CRYPT_FILE:=}"
 : "${PCLOUD_MOUNT:=/pcloud_internal}"
 : "${USER:=nobody}"
 : "${GROUP:=users}"
@@ -25,6 +26,12 @@ case "${UID}" in
 esac
 case "${GID}" in
   ''|*[!0-9]*) echo "ERROR: GID must be numeric, got '${GID}'" >&2; exit 1 ;;
+esac
+case "${USER}" in
+  ''|*[!a-zA-Z0-9._-]*) echo "ERROR: USER contains invalid characters, got '${USER}'" >&2; exit 1 ;;
+esac
+case "${GROUP}" in
+  ''|*[!a-zA-Z0-9._-]*) echo "ERROR: GROUP contains invalid characters, got '${GROUP}'" >&2; exit 1 ;;
 esac
 
 # --- Helpers ---
@@ -67,6 +74,15 @@ cleanup() {
 }
 trap cleanup TERM INT EXIT
 
+# --- Load secrets from files (e.g. Docker secrets at /run/secrets/) ---
+if [ -n "${PCLOUD_CRYPT_FILE}" ]; then
+  if [ ! -r "${PCLOUD_CRYPT_FILE}" ]; then
+    echo "ERROR: PCLOUD_CRYPT_FILE '${PCLOUD_CRYPT_FILE}' is not readable" >&2
+    exit 1
+  fi
+  PCLOUD_CRYPT="$(cat "${PCLOUD_CRYPT_FILE}")"
+fi
+
 # --- Setup ---
 mkdir -p "${PCLOUD_MOUNT}"
 echo "Setting owner rights (${USER}:${GROUP} to ${PCLOUD_MOUNT})"
@@ -107,7 +123,7 @@ if [ "${ENABLE_BINDFS}" = "1" ]; then
   (
     wait_for_mount "${PCLOUD_MOUNT}" "bindfs"
     echo "[bindfs] Mounting ${PCLOUD_MOUNT} -> ${BINDFS_TARGET} (uid=${UID}, gid=${GID})"
-    bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
+    exec bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
   ) &
   BINDFS_PID=$!
 fi
