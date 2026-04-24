@@ -25,8 +25,14 @@ services:
       - no-new-privileges:true
     devices:
       - /dev/fuse
+    # Drop all default capabilities and add back only what is actually needed.
+    # SYS_ADMIN: required for FUSE mount/umount by pcloudcc and bindfs.
+    # CHOWN:     required by entrypoint.sh to chown the mount point to USER:GROUP.
+    cap_drop:
+      - ALL
     cap_add:
       - SYS_ADMIN
+      - CHOWN
     # Required for first-time interactive login; can be removed after initial credential setup.
     stdin_open: true
     tty: true
