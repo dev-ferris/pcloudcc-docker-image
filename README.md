@@ -22,7 +22,7 @@ This project is essentially a Docker packaging layer. All the real work happens 
 - Built from the [lneely fork](https://github.com/lneely/pcloudcc-lneely) with up-to-date SSL fingerprints
 - Based on `debian:trixie-slim` (Debian 13, mbedTLS 3.x native)
 - Supports EU and US pCloud regions
-- Optional 2FA support
+- Optional 2FA support, with unattended first-time login via `PCLOUD_TOTP_SECRET` (TOTP shared secret)
 - Optional crypto folder unlock
 - Built-in `bindfs` for UID/GID remapping (useful on NAS setups)
 - Healthcheck included
@@ -108,6 +108,9 @@ Edit `.env` and set at least `PCLOUD_USER`. Other values are optional:
 
 ```env
 PCLOUD_USER=your@email.com
+# Set these only for the first start — once data.db is saved you can remove them.
+PCLOUD_PASSWORD=your_account_password
+PCLOUD_TOTP_SECRET=JBSWY3DPEHPK3PXP   # base32 secret from your authenticator (if 2FA is enabled)
 PCLOUD_CRYPT=your_crypto_password
 UID=1000
 GID=1000
@@ -126,18 +129,39 @@ docker compose up -d
 
 #### 5. First-time login
 
-On the very first start, the container won't have saved credentials yet. Check the logs for instructions:
+On the very first start, the container has no saved credentials yet. There are
+two ways to handle this.
 
-```bash
-docker logs pcloud
+##### Option 1 — Unattended (recommended)
+
+Set `PCLOUD_PASSWORD` in your `.env` file. If 2FA is enabled, also set
+`PCLOUD_TOTP_SECRET` (the base32 shared secret your authenticator showed you
+when you set up 2FA — usually labeled *secret key* or *manual entry key*).
+The entrypoint will then perform the first-time login automatically, generate
+a fresh TOTP code via `oathtool`, and save credentials to `data.db`.
+
+```env
+PCLOUD_PASSWORD=your_account_password
+PCLOUD_TOTP_SECRET=JBSWY3DPEHPK3PXP
 ```
 
-You'll see something like:
+Alternatively, you can provide a single fresh 6-digit code via `PCLOUD_2FA`
+instead of `PCLOUD_TOTP_SECRET` — but note that codes expire after ~30 seconds,
+so the container must start within that window.
+
+**Once `data.db` has been created, remove `PCLOUD_PASSWORD`, `PCLOUD_TOTP_SECRET`
+and `PCLOUD_2FA` from `.env`** — they are only needed for the initial setup
+and would otherwise sit in the container environment unnecessarily.
+
+##### Option 2 — Interactive
+
+Leave `PCLOUD_PASSWORD` unset. The container logs will show:
 
 ```
-No saved credentials found. Run the following inside the container:
+No saved credentials found. Either set PCLOUD_PASSWORD (and PCLOUD_TOTP_SECRET
+or PCLOUD_2FA if 2FA is enabled) for automatic login, or run the following
+inside the container:
   docker exec -it <container> pcloudcc -u your@email.com -m /pcloud_internal -p -s
-After 'status is READY' appears, press Ctrl+C and restart the container.
 ```
 
 Run that command (substituting your container name, e.g. `pcloud`):
@@ -146,7 +170,9 @@ Run that command (substituting your container name, e.g. `pcloud`):
 docker exec -it pcloud pcloudcc -u your@email.com -m /pcloud_internal -p -s
 ```
 
-Enter your password when prompted. If you have 2FA enabled, append `-t <code>` with a fresh code from your authenticator app (codes expire every ~30s, so don't reuse `PCLOUD_2FA`). Once you see `status is READY`, press `Ctrl+C` and restart the container:
+Enter your password when prompted. If you have 2FA enabled, append `-t <code>`
+with a fresh code from your authenticator app. Once you see `status is READY`,
+press `Ctrl+C` and restart the container:
 
 ```bash
 docker compose restart pcloud
@@ -159,7 +185,11 @@ From now on, the container will start automatically without manual intervention.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PCLOUD_USER` | Yes | — | Your pCloud account email |
-| `PCLOUD_2FA` | No | — | 2FA code (only for first login) |
+| `PCLOUD_PASSWORD` | No | — | Account password. If set, the entrypoint performs the first-time login automatically and can be removed once `data.db` exists. |
+| `PCLOUD_PASSWORD_FILE` | No | — | Path to a file with the account password (e.g. `/run/secrets/pcloud_password`); takes precedence over `PCLOUD_PASSWORD` |
+| `PCLOUD_TOTP_SECRET` | No | — | TOTP shared secret (base32). If set, fresh 6-digit codes are generated on demand with `oathtool`, so first-time login works unattended. |
+| `PCLOUD_TOTP_SECRET_FILE` | No | — | Path to a file with the TOTP secret; takes precedence over `PCLOUD_TOTP_SECRET` |
+| `PCLOUD_2FA` | No | — | Single-use 2FA code (alternative to `PCLOUD_TOTP_SECRET` — codes expire after ~30s) |
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
 | `PCLOUD_CRYPT_FILE` | No | — | Path to a file with the crypto password (e.g. `/run/secrets/pcloud_crypt`); takes precedence over `PCLOUD_CRYPT` |
 | `PCLOUD_MOUNT` | No | `/pcloud_internal` | Internal mount point (where pcloudcc mounts) |
@@ -198,7 +228,7 @@ A custom AppArmor profile that restricts the allowed syscalls to exactly those n
 
 ### Secrets in environment variables
 
-`PCLOUD_CRYPT` (and `PCLOUD_2FA`) are passed via environment variables, which are briefly visible in `/proc/<pid>/environ` and via `docker inspect` until they are `unset` inside the entrypoint. For higher security, use `PCLOUD_CRYPT_FILE` to point to a file (or Docker secret) that contains the password:
+`PCLOUD_CRYPT`, `PCLOUD_PASSWORD`, `PCLOUD_TOTP_SECRET` and `PCLOUD_2FA` are passed via environment variables, which are briefly visible in `/proc/<pid>/environ` and via `docker inspect` until they are `unset` inside the entrypoint. For higher security, use the corresponding `*_FILE` variants (`PCLOUD_CRYPT_FILE`, `PCLOUD_PASSWORD_FILE`, `PCLOUD_TOTP_SECRET_FILE`) to point to a file (or Docker secret) that contains the value:
 
 ```yaml
 # docker-compose.yml (Docker Swarm)
@@ -227,7 +257,7 @@ services:
 
 ### Interactive login and `stdin_open`/`tty`
 
-The compose file enables `stdin_open: true` and `tty: true` so you can attach to the container during first-time login. **Remove both options once credentials are saved** to `/root/.pcloud/data.db` to reduce the interactive attack surface.
+The compose file enables `stdin_open: true` and `tty: true` so you can attach to the container during first-time login. **Remove both options once credentials are saved** to `/root/.pcloud/data.db` to reduce the interactive attack surface. If you use the unattended login flow (`PCLOUD_PASSWORD` + `PCLOUD_TOTP_SECRET`), `stdin_open`/`tty` are not needed at all.
 
 ### Supply chain
 
@@ -272,7 +302,7 @@ fusermount -u /path/to/your/pcloud
 
 ## Migrating from DjSni/docker-image-pCloud
 
-This project is a drop-in replacement for [DjSni/docker-image-pCloud](https://github.com/DjSni/docker-image-pCloud). The environment variables (`PCLOUD_USER`, `PCLOUD_MOUNT`, `PCLOUD_2FA`, `PCLOUD_CRYPT`) work the same way. Just swap the image in your compose file with a `build:` section pointing to this repo, rebuild, and you're set.
+This project is a drop-in replacement for [DjSni/docker-image-pCloud](https://github.com/DjSni/docker-image-pCloud). The environment variables (`PCLOUD_USER`, `PCLOUD_MOUNT`, `PCLOUD_2FA`, `PCLOUD_CRYPT`) work the same way; this image additionally accepts `PCLOUD_PASSWORD` and `PCLOUD_TOTP_SECRET` for fully unattended first-time login. Just swap the image in your compose file with a `build:` section pointing to this repo, rebuild, and you're set.
 
 The main reason to migrate is that DjSni's image is based on the original `pcloudcom/console-client` v2.1.2, which stopped working after pCloud renewed their SSL certificates in early 2026. This image uses the actively maintained lneely fork with updated fingerprints.
 
