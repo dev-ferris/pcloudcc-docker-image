@@ -153,23 +153,24 @@ fi
 [ -n "${PCLOUD_PASSWORD}" ] && echo "Account password: provided"
 
 # --- Compute a fresh TOTP code from PCLOUD_TOTP_SECRET if available ---
-# Falls back to PCLOUD_2FA (a single, already-generated code) otherwise.
+# Prints the resulting 6-digit code on stdout; returns 0 on success (including
+# the no-2FA case, where stdout is empty) and 1 on hard failure (oathtool
+# missing or secret invalid). The caller captures the code via $(...).
 compute_tfa_code() {
+  _code=""
   if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
     if ! command -v oathtool >/dev/null 2>&1; then
       echo "ERROR: PCLOUD_TOTP_SECRET set but 'oathtool' is not installed" >&2
       return 1
     fi
-    if ! oathtool --totp -b "${PCLOUD_TOTP_SECRET}" 2>/dev/null; then
+    if ! _code="$(oathtool --totp -b "${PCLOUD_TOTP_SECRET}" 2>/dev/null)"; then
       echo "ERROR: failed to generate TOTP code (invalid base32 secret?)" >&2
       return 1
     fi
-    return 0
+  elif [ -n "${PCLOUD_2FA}" ]; then
+    _code="${PCLOUD_2FA}"
   fi
-  if [ -n "${PCLOUD_2FA}" ]; then
-    printf '%s' "${PCLOUD_2FA}"
-    return 0
-  fi
+  printf '%s' "${_code}"
   return 0
 }
 
