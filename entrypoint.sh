@@ -3,7 +3,11 @@ set -eu
 
 # --- Defaults ---
 : "${PCLOUD_USER:=}"
+: "${PCLOUD_PASSWORD:=}"
+: "${PCLOUD_PASSWORD_FILE:=}"
 : "${PCLOUD_2FA:=}"
+: "${PCLOUD_TOTP_SECRET:=}"
+: "${PCLOUD_TOTP_SECRET_FILE:=}"
 : "${PCLOUD_CRYPT:=}"
 : "${PCLOUD_CRYPT_FILE:=}"
 : "${PCLOUD_MOUNT:=/pcloud_internal}"
@@ -100,6 +104,29 @@ cleanup() {
     kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
   fi
 }
+
+# Prints a fresh 6-digit TOTP code on stdout (computed from PCLOUD_TOTP_SECRET
+# via oathtool, or echoed from PCLOUD_2FA as a single-shot fallback). Returns 0
+# on success — including the no-2FA case, where stdout is empty — and 1 only on
+# hard failure (oathtool missing or secret invalid). Caller captures via $(...).
+compute_tfa_code() {
+  _code=""
+  if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
+    if ! command -v oathtool >/dev/null 2>&1; then
+      echo "ERROR: PCLOUD_TOTP_SECRET set but 'oathtool' is not installed" >&2
+      return 1
+    fi
+    if ! _code="$(oathtool --totp -b "${PCLOUD_TOTP_SECRET}" 2>/dev/null)"; then
+      echo "ERROR: failed to generate TOTP code (invalid base32 secret?)" >&2
+      return 1
+    fi
+  elif [ -n "${PCLOUD_2FA}" ]; then
+    _code="${PCLOUD_2FA}"
+  fi
+  printf '%s' "${_code}"
+  return 0
+}
+
 trap cleanup TERM INT EXIT
 
 # --- Load secrets from files (e.g. Docker secrets at /run/secrets/) ---
@@ -109,6 +136,24 @@ if [ -n "${PCLOUD_CRYPT_FILE}" ]; then
     exit 1
   fi
   PCLOUD_CRYPT="$(cat "${PCLOUD_CRYPT_FILE}")"
+fi
+if [ -n "${PCLOUD_PASSWORD_FILE}" ]; then
+  if [ ! -r "${PCLOUD_PASSWORD_FILE}" ]; then
+    echo "ERROR: PCLOUD_PASSWORD_FILE '${PCLOUD_PASSWORD_FILE}' is not readable" >&2
+    exit 1
+  fi
+  PCLOUD_PASSWORD="$(cat "${PCLOUD_PASSWORD_FILE}")"
+fi
+if [ -n "${PCLOUD_TOTP_SECRET_FILE}" ]; then
+  if [ ! -r "${PCLOUD_TOTP_SECRET_FILE}" ]; then
+    echo "ERROR: PCLOUD_TOTP_SECRET_FILE '${PCLOUD_TOTP_SECRET_FILE}' is not readable" >&2
+    exit 1
+  fi
+  PCLOUD_TOTP_SECRET="$(cat "${PCLOUD_TOTP_SECRET_FILE}")"
+fi
+# Strip any whitespace from the TOTP base32 secret (paste-friendly).
+if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
+  PCLOUD_TOTP_SECRET="$(printf '%s' "${PCLOUD_TOTP_SECRET}" | tr -d '[:space:]')"
 fi
 
 # --- Setup ---
@@ -127,23 +172,63 @@ else
 fi
 
 [ -n "${PCLOUD_2FA}" ] && echo "2FA code: provided"
+[ -n "${PCLOUD_TOTP_SECRET}" ] && echo "TOTP secret: provided (codes generated automatically)"
+[ -n "${PCLOUD_PASSWORD}" ] && echo "Account password: provided"
 
 # --- First-time login ---
 if [ ! -f /root/.pcloud/data.db ]; then
-  echo "No saved credentials found. Run the following inside the container:"
-  echo "  docker exec -it <container> pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s"
-  if [ -n "${PCLOUD_2FA}" ]; then
-    echo "  (2FA is enabled — append '-t <code>' with a fresh code from your authenticator app;"
-    echo "   codes expire every ~30s, so don't reuse PCLOUD_2FA here.)"
-  fi
-  echo "After 'status is READY' appears, press Ctrl+C and restart the container."
-  exec sleep infinity
-fi
+  if [ -n "${PCLOUD_PASSWORD}" ]; then
+    echo "No saved credentials found — performing automatic first-time login."
+    _tfa_code="$(compute_tfa_code)" || exit 1
 
-# --- Start pcloudcc daemon ---
-echo "Starting pCloud command client"
-pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
-PCLOUD_PID=$!
+    # pcloudcc reads the account password from PCLOUD_ACCOUNT_PASSWORD when
+    # the interactive -p flag is not set. -s saves credentials to data.db.
+    set -- -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" -s
+    if [ -n "${_tfa_code}" ]; then
+      set -- "$@" -t "${_tfa_code}"
+    fi
+
+    echo "Starting pCloud command client (first-time login mode)"
+    PCLOUD_ACCOUNT_PASSWORD="${PCLOUD_PASSWORD}" pcloudcc "$@" &
+    PCLOUD_PID=$!
+
+    # Wipe the password from the environment as soon as pcloudcc has it.
+    unset PCLOUD_PASSWORD _tfa_code
+
+    # Wait for data.db to be created (proof that login succeeded).
+    _elapsed=0
+    until [ -f /root/.pcloud/data.db ]; do
+      if ! kill -0 "${PCLOUD_PID}" 2>/dev/null; then
+        echo "ERROR: pcloudcc exited during first-time login — check credentials/2FA" >&2
+        exit 1
+      fi
+      _elapsed=$((_elapsed + 2))
+      if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
+        echo "ERROR: first-time login did not complete within ${MOUNT_TIMEOUT}s" >&2
+        kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
+        exit 1
+      fi
+      sleep 2
+    done
+    echo "First-time login: credentials saved to /root/.pcloud/data.db"
+  else
+    echo "No saved credentials found. Either set PCLOUD_PASSWORD (and"
+    echo "PCLOUD_TOTP_SECRET or PCLOUD_2FA if 2FA is enabled) for automatic login,"
+    echo "or run the following inside the container:"
+    echo "  docker exec -it <container> pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s"
+    if [ -n "${PCLOUD_2FA}" ]; then
+      echo "  (2FA is enabled — append '-t <code>' with a fresh code from your authenticator app;"
+      echo "   codes expire every ~30s, so don't reuse PCLOUD_2FA here.)"
+    fi
+    echo "After 'status is READY' appears, press Ctrl+C and restart the container."
+    exec sleep infinity
+  fi
+else
+  # --- Start pcloudcc daemon ---
+  echo "Starting pCloud command client"
+  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
+  PCLOUD_PID=$!
+fi
 
 # --- Optional crypto unlock ---
 # A failed unlock (e.g. wrong password) must not abort the entrypoint and take
@@ -167,8 +252,8 @@ if [ -n "${PCLOUD_CRYPT}" ]; then
   unset PCLOUD_CRYPT
 fi
 
-# Clear 2FA code from environment after startup
-unset PCLOUD_2FA 2>/dev/null || true
+# Clear 2FA code and TOTP secret from environment after startup
+unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
 
 # --- Optional bindfs overlay ---
 if [ "${ENABLE_BINDFS}" = "1" ]; then

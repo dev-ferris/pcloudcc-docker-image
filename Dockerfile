@@ -56,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     ca-certificates \
     bindfs \
+    oathtool \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
 
@@ -65,7 +66,11 @@ COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
 ENV PCLOUD_USER="" \
+    PCLOUD_PASSWORD="" \
+    PCLOUD_PASSWORD_FILE="" \
     PCLOUD_2FA="" \
+    PCLOUD_TOTP_SECRET="" \
+    PCLOUD_TOTP_SECRET_FILE="" \
     PCLOUD_CRYPT="" \
     PCLOUD_CRYPT_FILE="" \
     PCLOUD_MOUNT="/pcloud_internal" \
