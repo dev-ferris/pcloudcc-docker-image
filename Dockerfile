@@ -64,6 +64,7 @@ RUN mkdir -p /pcloud_internal
 
 COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY --chmod=755 healthcheck.sh /healthcheck.sh
 
 ENV PCLOUD_USER="" \
     PCLOUD_PASSWORD="" \
@@ -83,12 +84,6 @@ ENV PCLOUD_USER="" \
     MOUNT_TIMEOUT="60"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD if [ ! -f /root/.pcloud/data.db ]; then \
-          exit 0; \
-        elif [ "${ENABLE_BINDFS}" = "1" ]; then \
-          mountpoint -q "${BINDFS_TARGET}" && [ -n "$(ls -A "${BINDFS_TARGET}" 2>/dev/null)" ]; \
-        else \
-          mountpoint -q "${PCLOUD_MOUNT}" && [ -n "$(ls -A "${PCLOUD_MOUNT}" 2>/dev/null)" ]; \
-        fi
+    CMD ["/healthcheck.sh"]
 
 ENTRYPOINT ["/entrypoint.sh"]
