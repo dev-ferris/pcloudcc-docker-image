@@ -274,6 +274,27 @@ start_daemon() {
   PCLOUD_PID=$!
 }
 
+# Stops the pcloudcc background process and tears down its FUSE mount so a
+# clean daemon can take its place. Used between first_time_login (which runs
+# pcloudcc with `-s` in a transient state that does not reliably accept IPC
+# commands) and the regular daemon needed for `crypto start`.
+stop_pcloudcc() {
+  [ -n "${PCLOUD_PID}" ] || return 0
+  if kill -0 "${PCLOUD_PID}" 2>/dev/null; then
+    kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "${PCLOUD_PID}" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
+  fi
+  wait "${PCLOUD_PID}" 2>/dev/null || true
+  if mountpoint -q "${PCLOUD_MOUNT}" 2>/dev/null; then
+    fusermount -u "${PCLOUD_MOUNT}" 2>/dev/null || true
+  fi
+  PCLOUD_PID=""
+}
+
 first_time_login() {
   echo "No saved credentials found — performing automatic first-time login."
   _tfa_code="$(compute_tfa_code)" || exit 1
@@ -294,6 +315,14 @@ first_time_login() {
 
   wait_for_login || exit 1
   echo "First-time login: credentials saved to ${DATA_DB}"
+
+  # The `-s [-t TFA]` invocation leaves the daemon in a transient state that
+  # does not reliably answer IPC commands like `crypto start`. Replace it
+  # with a clean daemon before continuing so unlock_crypto has a stable
+  # target.
+  echo "Restarting pcloudcc in normal mode after first-time login..."
+  stop_pcloudcc
+  start_daemon
 }
 
 # Picks the appropriate startup path: existing credentials DB, automatic
