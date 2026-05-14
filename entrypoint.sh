@@ -260,7 +260,12 @@ first_time_login() {
   # Wipe the password from the environment as soon as pcloudcc has it.
   unset PCLOUD_PASSWORD _tfa_code
 
-  # Wait for data.db to be created (proof that login succeeded).
+  # data.db is created early in the login flow — well before the server
+  # actually authenticates the account and the FUSE mount becomes usable.
+  # Tearing the daemon down at that point would leave it in a half-initialized
+  # state and a subsequent `crypto start` would land on a daemon that is not
+  # yet ready to honour it. Wait for the FUSE mount to come up populated,
+  # which is the earliest reliable signal that login truly succeeded.
   _elapsed=0
   until [ -f /root/.pcloud/data.db ]; do
     if ! kill -0 "${PCLOUD_PID}" 2>/dev/null; then
@@ -276,6 +281,13 @@ first_time_login() {
     sleep 2
   done
   echo "First-time login: credentials saved to /root/.pcloud/data.db"
+
+  if ! wait_for_mount "${PCLOUD_MOUNT}" "first-login"; then
+    echo "ERROR: first-time login completed but pcloud mount did not become ready" >&2
+    kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
+    exit 1
+  fi
+  echo "First-time login: pCloud mount ready — login fully successful."
 
   # The first-time-login invocation (`pcloudcc … -s [-t TFA]`) leaves the
   # daemon in a transient state that does not reliably answer IPC commands
