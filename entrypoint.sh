@@ -128,6 +128,13 @@ load_secrets() {
   fi
 }
 
+# Clear sensitive data from the environment after startup is complete.
+# pcloudcc already has what it needs; anything still set here would leak
+# into child processes (e.g. bindfs) and into `docker inspect` output.
+clear_sensitive_env() {
+  unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
+}
+
 # Prints a fresh 6-digit TOTP code on stdout (computed from PCLOUD_TOTP_SECRET
 # via oathtool, or echoed from PCLOUD_2FA as a single-shot fallback). Returns 0
 # on success — including the no-2FA case, where stdout is empty — and 1 only on
@@ -338,13 +345,6 @@ start_bindfs() {
     exec bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
   ) &
   BINDFS_PID=$!
-}
-
-# Clear sensitive data from the environment after startup is complete.
-# pcloudcc already has what it needs; anything still set here would leak
-# into child processes (e.g. bindfs) and into `docker inspect` output.
-clear_sensitive_env() {
-  unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
 }
 
 # =============================================================================
