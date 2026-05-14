@@ -85,10 +85,12 @@ ENV PCLOUD_USER="" \
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD if [ ! -f /root/.pcloud/data.db ]; then \
           exit 0; \
-        elif [ "${ENABLE_BINDFS}" = "1" ]; then \
-          mountpoint -q "${BINDFS_TARGET}" && [ -n "$(ls -A "${BINDFS_TARGET}" 2>/dev/null)" ]; \
         else \
-          mountpoint -q "${PCLOUD_MOUNT}" && [ -n "$(ls -A "${PCLOUD_MOUNT}" 2>/dev/null)" ]; \
+          if [ "${ENABLE_BINDFS}" = "1" ]; then _mnt="${BINDFS_TARGET}"; else _mnt="${PCLOUD_MOUNT}"; fi; \
+          mountpoint -q "${_mnt}" && [ -n "$(ls -A "${_mnt}" 2>/dev/null)" ] || exit 1; \
+          if [ -n "${PCLOUD_CRYPT}" ] || [ -n "${PCLOUD_CRYPT_FILE}" ]; then \
+            [ -d "${_mnt}/Crypto Folder" ] && [ -n "$(ls -A "${_mnt}/Crypto Folder" 2>/dev/null)" ] || exit 1; \
+          fi; \
         fi
 
 ENTRYPOINT ["/entrypoint.sh"]
