@@ -139,9 +139,10 @@ start_pcloudcc() {
 }
 
 # Stop the pcloudcc background process and tear down its FUSE mount.
-# Used between first-time-login mode and the normal daemon, where the
-# `-s` invocation must be replaced by a plain daemon before IPC commands
-# (e.g. `crypto start`) can reach it reliably.
+# Used between first-time-login mode and the normal daemon (the `-s`
+# invocation must be replaced by a plain daemon before IPC commands such
+# as `crypto start` can reach it reliably) and again from cleanup() on
+# container shutdown.
 stop_pcloudcc() {
   [ -n "${PCLOUD_PID}" ] || return 0
   if kill -0 "${PCLOUD_PID}" 2>/dev/null; then
@@ -191,13 +192,8 @@ cleanup() {
   # Graceful pcloudcc shutdown - give it time to finish pending transfers
   if [ -n "${PCLOUD_PID}" ] && kill -0 "${PCLOUD_PID}" 2>/dev/null; then
     echo "Stopping pcloudcc gracefully..."
-    kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      kill -0 "${PCLOUD_PID}" 2>/dev/null || break
-      sleep 1
-    done
-    kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
   fi
+  stop_pcloudcc
 }
 
 # ============================================================================
