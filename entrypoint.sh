@@ -300,14 +300,6 @@ first_time_login() {
 
 # A failed unlock (e.g. wrong password) must not abort the entrypoint and take
 # the pcloudcc daemon down with it — log the failure and keep going.
-#
-# After first-time login the freshly restarted daemon may answer IPC before it
-# is fully ready to process `crypto start` (the FUSE mount comes up populated
-# with at least the always-present "Crypto Folder" entry, so wait_for_mount
-# cannot tell the difference). `pcloudcc -k` returns 0 in that window even
-# when the command is silently dropped — we therefore verify the unlock by
-# reading the crypto folder (which denies access with "Permission denied"
-# until `crypto start` succeeds) and retry until it sticks.
 unlock_crypto() {
   [ -n "${PCLOUD_CRYPT}" ] || return 0
 
@@ -318,54 +310,16 @@ unlock_crypto() {
     return 0
   fi
 
-  _crypto_dir="${PCLOUD_MOUNT}/Crypto Folder"
-  _max_attempts=6
-  _attempt=1
-  _unlocked=0
-  _last_log=""
-
-  while [ "${_attempt}" -le "${_max_attempts}" ]; do
-    _crypto_log=$(mktemp)
-    printf 'crypto start %s\n' "${PCLOUD_CRYPT}" \
-      | pcloudcc -u "${PCLOUD_USER}" -k > "${_crypto_log}" 2>&1 || true
-
-    # Give the daemon a moment to apply the unlock before probing.
-    sleep 2
-
-    if [ -d "${_crypto_dir}" ]; then
-      _check_out=$(LC_ALL=C ls -al "${_crypto_dir}" 2>&1)
-      _check_rc=$?
-      case "${_check_out}" in
-        *"Permission denied"*) : ;;
-        *)
-          if [ "${_check_rc}" -eq 0 ]; then
-            echo "Crypto folder unlocked (attempt ${_attempt}/${_max_attempts})."
-            _unlocked=1
-            rm -f "${_crypto_log}"
-            break
-          fi
-          ;;
-      esac
-    fi
-
-    _last_log="${_crypto_log}"
-    if [ "${_attempt}" -lt "${_max_attempts}" ]; then
-      echo "Crypto folder still locked after attempt ${_attempt}/${_max_attempts}; retrying..."
-      rm -f "${_crypto_log}"
-      sleep 3
-    fi
-    _attempt=$((_attempt + 1))
-  done
-
-  if [ "${_unlocked}" -ne 1 ]; then
-    echo "WARNING: crypto unlock did not take effect after ${_max_attempts} attempts (wrong password?). pcloudcc keeps running." >&2
-    if [ -n "${_last_log}" ] && [ -f "${_last_log}" ]; then
-      sed 's/^/  pcloudcc: /' "${_last_log}" >&2 || true
-      rm -f "${_last_log}"
-    fi
+  _crypto_log=$(mktemp)
+  if printf 'crypto start %s\n' "${PCLOUD_CRYPT}" \
+       | pcloudcc -u "${PCLOUD_USER}" -k > "${_crypto_log}" 2>&1; then
+    echo "Crypto folder unlock requested."
+  else
+    echo "WARNING: crypto unlock command failed (wrong password?). pcloudcc keeps running." >&2
+    sed 's/^/  pcloudcc: /' "${_crypto_log}" >&2 || true
   fi
-
-  unset _crypto_dir _crypto_log _last_log _check_out _check_rc _max_attempts _attempt _unlocked PCLOUD_CRYPT
+  rm -f "${_crypto_log}"
+  unset _crypto_log PCLOUD_CRYPT
 }
 
 start_bindfs_overlay() {
