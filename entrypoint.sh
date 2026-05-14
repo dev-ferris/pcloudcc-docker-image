@@ -198,64 +198,42 @@ cleanup() {
   fi
 }
 
-# =============================================================================
-# Mount-point setup
-# =============================================================================
-
-setup_mount_point() {
-  # With read_only: true the container FS is immutable; PCLOUD_MOUNT must be
-  # listed under tmpfs (or pre-created in the image) so mkdir/chown can succeed.
-  if ! mkdir -p "${PCLOUD_MOUNT}" 2>/dev/null; then
-    err "Cannot create mount point '${PCLOUD_MOUNT}'."
-    echo "       When using read_only: true, add '${PCLOUD_MOUNT}' to the tmpfs list in docker-compose.yml." >&2
-    exit 1
+# Stop the pcloudcc background process and tear down its FUSE mount.
+# Used between first-time-login mode and the normal daemon, where the
+# `-s` invocation must be replaced by a plain daemon before IPC commands
+# (e.g. `crypto start`) can reach it reliably.
+stop_pcloudcc() {
+  [ -n "${PCLOUD_PID:-}" ] || return 0
+  if kill -0 "${PCLOUD_PID}" 2>/dev/null; then
+    kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "${PCLOUD_PID}" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
   fi
-  if chown -R "${USER}:${GROUP}" "${PCLOUD_MOUNT}" 2>/dev/null; then
-    echo "Setting owner rights (${USER}:${GROUP}) on ${PCLOUD_MOUNT}"
-  else
-    warn "Could not set ownership on '${PCLOUD_MOUNT}' (read-only filesystem?)."
-    echo "         Add '${PCLOUD_MOUNT}' to the tmpfs list in docker-compose.yml." >&2
+  wait "${PCLOUD_PID}" 2>/dev/null || true
+  if mountpoint -q "${PCLOUD_MOUNT}" 2>/dev/null; then
+    fusermount -u "${PCLOUD_MOUNT}" 2>/dev/null || true
   fi
+  PCLOUD_PID=""
 }
 
-announce_credentials() {
-  [ -n "${PCLOUD_2FA}" ]         && echo "2FA code: provided"
-  [ -n "${PCLOUD_TOTP_SECRET}" ] && echo "TOTP secret: provided (codes generated automatically)"
-  [ -n "${PCLOUD_PASSWORD}" ]    && echo "Account password: provided"
-  return 0
+start_pcloudcc() {
+  echo "Starting pCloud command client"
+  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
+  PCLOUD_PID=$!
 }
 
-# =============================================================================
-# Daemon / first-time login
-# =============================================================================
-
-has_saved_credentials() {
-  [ -f "${DATA_DB}" ]
-}
-
-can_auto_login() {
-  [ -n "${PCLOUD_PASSWORD}" ]
-}
-
-print_manual_login_instructions() {
-  echo "No saved credentials found. Either set PCLOUD_PASSWORD (and"
-  echo "PCLOUD_TOTP_SECRET or PCLOUD_2FA if 2FA is enabled) for automatic login,"
-  echo "or run the following inside the container:"
-  echo "  docker exec -it <container> pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s"
-  if [ -n "${PCLOUD_2FA}" ]; then
-    echo "  (2FA is enabled — append '-t <code>' with a fresh code from your authenticator app;"
-    echo "   codes expire every ~30s, so don't reuse PCLOUD_2FA here.)"
-  fi
-  echo "After 'status is READY' appears, press Ctrl+C and restart the container."
-}
-
-# Polls for the credentials database while the background pcloudcc process is
-# still alive. Relies on PCLOUD_PID set by first_time_login().
-wait_for_login() {
-  _elapsed=0
-  until [ -f "${DATA_DB}" ]; do
-    if ! kill -0 "${PCLOUD_PID}" 2>/dev/null; then
-      err "pcloudcc exited during first-time login — check credentials/2FA"
+# Prints a fresh 6-digit TOTP code on stdout (computed from PCLOUD_TOTP_SECRET
+# via oathtool, or echoed from PCLOUD_2FA as a single-shot fallback). Returns 0
+# on success — including the no-2FA case, where stdout is empty — and 1 only on
+# hard failure (oathtool missing or secret invalid). Caller captures via $(...).
+compute_tfa_code() {
+  _code=""
+  if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
+    if ! command -v oathtool >/dev/null 2>&1; then
+      echo "ERROR: PCLOUD_TOTP_SECRET set but 'oathtool' is not installed" >&2
       return 1
     fi
     _elapsed=$((_elapsed + 2))
@@ -306,46 +284,45 @@ first_time_login() {
     set -- "$@" -t "${_tfa_code}"
   fi
 
-  echo "Starting pCloud command client (first-time login mode)"
-  PCLOUD_ACCOUNT_PASSWORD="${PCLOUD_PASSWORD}" pcloudcc "$@" &
-  PCLOUD_PID=$!
+    echo "Starting pCloud command client (first-time login mode)"
+    PCLOUD_ACCOUNT_PASSWORD="${PCLOUD_PASSWORD}" pcloudcc "$@" &
+    PCLOUD_PID=$!
 
-  # Wipe the password from the environment as soon as pcloudcc has it.
-  unset PCLOUD_PASSWORD _tfa_code
+    # Wipe the password from the environment as soon as pcloudcc has it.
+    unset PCLOUD_PASSWORD _tfa_code
 
-  wait_for_login || exit 1
-  echo "First-time login: credentials saved to ${DATA_DB}"
+    # Wait for data.db to be created (proof that login succeeded).
+    _elapsed=0
+    until [ -f /root/.pcloud/data.db ]; do
+      if ! kill -0 "${PCLOUD_PID}" 2>/dev/null; then
+        echo "ERROR: pcloudcc exited during first-time login — check credentials/2FA" >&2
+        exit 1
+      fi
+      _elapsed=$((_elapsed + 2))
+      if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
+        echo "ERROR: first-time login did not complete within ${MOUNT_TIMEOUT}s" >&2
+        kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
+        exit 1
+      fi
+      sleep 2
+    done
+    echo "First-time login: credentials saved to /root/.pcloud/data.db"
 
-  # The `-s [-t TFA]` invocation leaves the daemon in a transient state that
-  # does not reliably answer IPC commands like `crypto start`. Replace it
-  # with a clean daemon before continuing so unlock_crypto has a stable
-  # target.
-  echo "Restarting pcloudcc in normal mode after first-time login..."
-  stop_pcloudcc
-  start_daemon
-}
-
-# Picks the appropriate startup path: existing credentials DB, automatic
-# first-time login, or pause-and-wait for a manual interactive login.
-start_pcloudcc() {
-  if has_saved_credentials; then
-    start_daemon
-  elif can_auto_login; then
-    first_time_login
+    # The first-time-login invocation (`pcloudcc … -s [-t TFA]`) leaves the
+    # daemon in a transient state that does not reliably answer IPC commands
+    # like `crypto start`. Replace it with a clean daemon before continuing
+    # so the optional crypto unlock below has a stable target.
+    echo "Restarting pcloudcc in normal mode after first-time login..."
+    stop_pcloudcc
+    start_pcloudcc
   else
     print_manual_login_instructions
     exec sleep infinity
   fi
-}
-
-# =============================================================================
-# Optional features
-# =============================================================================
-
-# A failed crypto unlock (e.g. wrong password) must not abort the entrypoint
-# and take the pcloudcc daemon down with it — log the failure and keep going.
-unlock_crypto() {
-  [ -n "${PCLOUD_CRYPT}" ] || return 0
+else
+  # --- Start pcloudcc daemon ---
+  start_pcloudcc
+fi
 
   echo "Crypto password: provided"
   if ! wait_for_mount "${PCLOUD_MOUNT}" "pcloud"; then
