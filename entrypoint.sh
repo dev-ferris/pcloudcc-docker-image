@@ -1,7 +1,22 @@
 #!/bin/sh
+# Bootstraps pcloudcc inside the container.
+#
+# Lifecycle (see main() at the bottom):
+#   1. validate environment / mount paths
+#   2. load secrets from *_FILE variables (Docker secrets compatible)
+#   3. prepare the mount point
+#   4. start pcloudcc (saved credentials, automatic first-time login, or
+#      pause for a manual interactive login via `docker exec`)
+#   5. unlock the crypto folder if configured
+#   6. spawn the bindfs overlay if enabled
+#   7. wait for pcloudcc; clean up child processes on signal
+
 set -eu
 
-# --- Defaults ---
+# =============================================================================
+# Configuration & defaults
+# =============================================================================
+
 : "${PCLOUD_USER:=}"
 : "${PCLOUD_PASSWORD:=}"
 : "${PCLOUD_PASSWORD_FILE:=}"
@@ -21,7 +36,22 @@ set -eu
 
 DATA_DB=/root/.pcloud/data.db
 
-# --- Validation ---
+# Backgrounded child PIDs. Populated by start_daemon / first_time_login /
+# start_bindfs, consumed by cleanup() on signal.
+PCLOUD_PID=""
+BINDFS_PID=""
+
+# =============================================================================
+# Logging helpers
+# =============================================================================
+
+warn() { echo "WARNING: $*" >&2; }
+err()  { echo "ERROR: $*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# =============================================================================
+# Validation
+# =============================================================================
 
 # Guard against typos that would make the recursive chown below disastrous.
 # Both mount paths must be absolute and must not be the root filesystem or a
@@ -31,60 +61,54 @@ validate_mount_path() {
   _path="$2"
   case "${_path}" in
     ""|"/")
-      echo "ERROR: ${_name}='${_path}' must not be empty or '/'" >&2; exit 1 ;;
+      die "${_name}='${_path}' must not be empty or '/'" ;;
     /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
-      echo "ERROR: ${_name}='${_path}' is a top-level system directory; refusing to chown -R there" >&2; exit 1 ;;
+      die "${_name}='${_path}' is a top-level system directory; refusing to chown -R there" ;;
     /*)
       case "${_path}" in
-        *..*) echo "ERROR: ${_name}='${_path}' must not contain '..'" >&2; exit 1 ;;
+        *..*) die "${_name}='${_path}' must not contain '..'" ;;
       esac
       ;;
     *)
-      echo "ERROR: ${_name}='${_path}' must be an absolute path" >&2; exit 1 ;;
+      die "${_name}='${_path}' must be an absolute path" ;;
   esac
 }
 
 validate_env() {
-  if [ -z "${PCLOUD_USER}" ]; then
-    echo "ERROR: PCLOUD_USER is required" >&2
-    exit 1
-  fi
+  [ -n "${PCLOUD_USER}" ] || die "PCLOUD_USER is required"
 
   case "${UID}" in
-    ''|*[!0-9]*) echo "ERROR: UID must be numeric, got '${UID}'" >&2; exit 1 ;;
+    ''|*[!0-9]*) die "UID must be numeric, got '${UID}'" ;;
   esac
   case "${GID}" in
-    ''|*[!0-9]*) echo "ERROR: GID must be numeric, got '${GID}'" >&2; exit 1 ;;
+    ''|*[!0-9]*) die "GID must be numeric, got '${GID}'" ;;
   esac
   case "${USER}" in
-    ''|*[!a-zA-Z0-9._-]*) echo "ERROR: USER contains invalid characters, got '${USER}'" >&2; exit 1 ;;
+    ''|*[!a-zA-Z0-9._-]*) die "USER contains invalid characters, got '${USER}'" ;;
   esac
   case "${GROUP}" in
-    ''|*[!a-zA-Z0-9._-]*) echo "ERROR: GROUP contains invalid characters, got '${GROUP}'" >&2; exit 1 ;;
+    ''|*[!a-zA-Z0-9._-]*) die "GROUP contains invalid characters, got '${GROUP}'" ;;
   esac
 
   validate_mount_path PCLOUD_MOUNT "${PCLOUD_MOUNT}"
   if [ "${ENABLE_BINDFS}" = "1" ]; then
     validate_mount_path BINDFS_TARGET "${BINDFS_TARGET}"
-    if [ "${BINDFS_TARGET}" = "${PCLOUD_MOUNT}" ]; then
-      echo "ERROR: BINDFS_TARGET must differ from PCLOUD_MOUNT" >&2
-      exit 1
-    fi
+    [ "${BINDFS_TARGET}" != "${PCLOUD_MOUNT}" ] \
+      || die "BINDFS_TARGET must differ from PCLOUD_MOUNT"
   fi
 }
 
-# --- Secrets ---
+# =============================================================================
+# Secrets & authentication
+# =============================================================================
 
 # Read a secret from a file (e.g. Docker secrets at /run/secrets/).
-# Prints the file contents on stdout; exits non-zero with an error if the file
-# is unreadable. Callers capture via $(read_secret_file ...).
+# Prints the file contents on stdout; returns 1 if the file is unreadable.
+# Callers capture via $(read_secret_file ...).
 read_secret_file() {
   _file="$1"
   _name="$2"
-  if [ ! -r "${_file}" ]; then
-    echo "ERROR: ${_name} '${_file}' is not readable" >&2
-    return 1
-  fi
+  [ -r "${_file}" ] || { err "${_name} '${_file}' is not readable"; return 1; }
   cat "${_file}"
 }
 
@@ -98,7 +122,7 @@ load_secrets() {
   if [ -n "${PCLOUD_TOTP_SECRET_FILE}" ]; then
     PCLOUD_TOTP_SECRET=$(read_secret_file "${PCLOUD_TOTP_SECRET_FILE}" PCLOUD_TOTP_SECRET_FILE) || exit 1
   fi
-  # Strip any whitespace from the TOTP base32 secret (paste-friendly).
+  # Strip whitespace from the TOTP base32 secret (paste-friendly).
   if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
     PCLOUD_TOTP_SECRET=$(printf '%s' "${PCLOUD_TOTP_SECRET}" | tr -d '[:space:]')
   fi
@@ -111,12 +135,10 @@ load_secrets() {
 compute_tfa_code() {
   _code=""
   if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
-    if ! command -v oathtool >/dev/null 2>&1; then
-      echo "ERROR: PCLOUD_TOTP_SECRET set but 'oathtool' is not installed" >&2
-      return 1
-    fi
+    command -v oathtool >/dev/null 2>&1 \
+      || { err "PCLOUD_TOTP_SECRET set but 'oathtool' is not installed"; return 1; }
     if ! _code="$(oathtool --totp -b "${PCLOUD_TOTP_SECRET}" 2>/dev/null)"; then
-      echo "ERROR: failed to generate TOTP code (invalid base32 secret?)" >&2
+      err "failed to generate TOTP code (invalid base32 secret?)"
       return 1
     fi
   elif [ -n "${PCLOUD_2FA}" ]; then
@@ -126,7 +148,9 @@ compute_tfa_code() {
   return 0
 }
 
-# --- Mount / process helpers ---
+# =============================================================================
+# Mount / process helpers
+# =============================================================================
 
 wait_for_mount() {
   _path="$1"
@@ -136,7 +160,7 @@ wait_for_mount() {
   until mountpoint -q "${_path}" && [ -n "$(ls -A "${_path}" 2>/dev/null)" ]; do
     _elapsed=$((_elapsed + 2))
     if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
-      echo "ERROR: [${_tag}] Mount at ${_path} did not become ready within ${MOUNT_TIMEOUT}s" >&2
+      err "[${_tag}] Mount at ${_path} did not become ready within ${MOUNT_TIMEOUT}s"
       return 1
     fi
     sleep 2
@@ -148,18 +172,17 @@ cleanup() {
   trap - TERM INT EXIT
   echo "Shutting down..."
 
-  if [ -n "${BINDFS_PID:-}" ]; then
+  if [ -n "${BINDFS_PID}" ]; then
     kill "${BINDFS_PID}" 2>/dev/null || true
   fi
   if [ "${ENABLE_BINDFS}" = "1" ] && mountpoint -q "${BINDFS_TARGET}" 2>/dev/null; then
     fusermount -u "${BINDFS_TARGET}" 2>/dev/null || true
   fi
 
-  # Graceful pcloudcc shutdown - give it time to finish pending transfers
-  if [ -n "${PCLOUD_PID:-}" ] && kill -0 "${PCLOUD_PID}" 2>/dev/null; then
+  # Graceful pcloudcc shutdown — give it time to finish pending transfers.
+  if [ -n "${PCLOUD_PID}" ] && kill -0 "${PCLOUD_PID}" 2>/dev/null; then
     echo "Stopping pcloudcc gracefully..."
     kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
-    # Wait up to 10 seconds for clean exit
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       kill -0 "${PCLOUD_PID}" 2>/dev/null || break
       sleep 1
@@ -168,32 +191,44 @@ cleanup() {
   fi
 }
 
-# --- Setup ---
+# =============================================================================
+# Mount-point setup
+# =============================================================================
 
 setup_mount_point() {
   # With read_only: true the container FS is immutable; PCLOUD_MOUNT must be
   # listed under tmpfs (or pre-created in the image) so mkdir/chown can succeed.
   if ! mkdir -p "${PCLOUD_MOUNT}" 2>/dev/null; then
-    echo "ERROR: Cannot create mount point '${PCLOUD_MOUNT}'." >&2
+    err "Cannot create mount point '${PCLOUD_MOUNT}'."
     echo "       When using read_only: true, add '${PCLOUD_MOUNT}' to the tmpfs list in docker-compose.yml." >&2
     exit 1
   fi
   if chown -R "${USER}:${GROUP}" "${PCLOUD_MOUNT}" 2>/dev/null; then
     echo "Setting owner rights (${USER}:${GROUP}) on ${PCLOUD_MOUNT}"
   else
-    echo "WARNING: Could not set ownership on '${PCLOUD_MOUNT}' (read-only filesystem?)." >&2
+    warn "Could not set ownership on '${PCLOUD_MOUNT}' (read-only filesystem?)."
     echo "         Add '${PCLOUD_MOUNT}' to the tmpfs list in docker-compose.yml." >&2
   fi
 }
 
 announce_credentials() {
-  [ -n "${PCLOUD_2FA}" ]          && echo "2FA code: provided"
-  [ -n "${PCLOUD_TOTP_SECRET}" ]  && echo "TOTP secret: provided (codes generated automatically)"
-  [ -n "${PCLOUD_PASSWORD}" ]     && echo "Account password: provided"
+  [ -n "${PCLOUD_2FA}" ]         && echo "2FA code: provided"
+  [ -n "${PCLOUD_TOTP_SECRET}" ] && echo "TOTP secret: provided (codes generated automatically)"
+  [ -n "${PCLOUD_PASSWORD}" ]    && echo "Account password: provided"
   return 0
 }
 
-# --- Login / daemon ---
+# =============================================================================
+# Daemon / first-time login
+# =============================================================================
+
+has_saved_credentials() {
+  [ -f "${DATA_DB}" ]
+}
+
+can_auto_login() {
+  [ -n "${PCLOUD_PASSWORD}" ]
+}
 
 print_manual_login_instructions() {
   echo "No saved credentials found. Either set PCLOUD_PASSWORD (and"
@@ -208,17 +243,17 @@ print_manual_login_instructions() {
 }
 
 # Polls for the credentials database while the background pcloudcc process is
-# still alive. Sets the global PCLOUD_PID expected by cleanup().
+# still alive. Relies on PCLOUD_PID set by first_time_login().
 wait_for_login() {
   _elapsed=0
   until [ -f "${DATA_DB}" ]; do
     if ! kill -0 "${PCLOUD_PID}" 2>/dev/null; then
-      echo "ERROR: pcloudcc exited during first-time login — check credentials/2FA" >&2
+      err "pcloudcc exited during first-time login — check credentials/2FA"
       return 1
     fi
     _elapsed=$((_elapsed + 2))
     if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
-      echo "ERROR: first-time login did not complete within ${MOUNT_TIMEOUT}s" >&2
+      err "first-time login did not complete within ${MOUNT_TIMEOUT}s"
       kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
       return 1
     fi
@@ -226,12 +261,13 @@ wait_for_login() {
   done
 }
 
-first_time_login() {
-  if [ -z "${PCLOUD_PASSWORD}" ]; then
-    print_manual_login_instructions
-    exec sleep infinity
-  fi
+start_daemon() {
+  echo "Starting pCloud command client"
+  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
+  PCLOUD_PID=$!
+}
 
+first_time_login() {
   echo "No saved credentials found — performing automatic first-time login."
   _tfa_code="$(compute_tfa_code)" || exit 1
 
@@ -253,13 +289,22 @@ first_time_login() {
   echo "First-time login: credentials saved to ${DATA_DB}"
 }
 
-start_daemon() {
-  echo "Starting pCloud command client"
-  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
-  PCLOUD_PID=$!
+# Picks the appropriate startup path: existing credentials DB, automatic
+# first-time login, or pause-and-wait for a manual interactive login.
+start_pcloudcc() {
+  if has_saved_credentials; then
+    start_daemon
+  elif can_auto_login; then
+    first_time_login
+  else
+    print_manual_login_instructions
+    exec sleep infinity
+  fi
 }
 
-# --- Optional features ---
+# =============================================================================
+# Optional features
+# =============================================================================
 
 # A failed crypto unlock (e.g. wrong password) must not abort the entrypoint
 # and take the pcloudcc daemon down with it — log the failure and keep going.
@@ -268,7 +313,7 @@ unlock_crypto() {
 
   echo "Crypto password: provided"
   if ! wait_for_mount "${PCLOUD_MOUNT}" "pcloud"; then
-    echo "WARNING: skipping crypto unlock — pcloud mount did not become ready." >&2
+    warn "skipping crypto unlock — pcloud mount did not become ready."
     unset PCLOUD_CRYPT
     return 0
   fi
@@ -278,7 +323,7 @@ unlock_crypto() {
        | pcloudcc -u "${PCLOUD_USER}" -k > "${_crypto_log}" 2>&1; then
     echo "Crypto folder unlock requested."
   else
-    echo "WARNING: crypto unlock command failed (wrong password?). pcloudcc keeps running." >&2
+    warn "crypto unlock command failed (wrong password?). pcloudcc keeps running."
     sed 's/^/  pcloudcc: /' "${_crypto_log}" >&2 || true
   fi
   rm -f "${_crypto_log}"
@@ -295,7 +340,9 @@ start_bindfs() {
   BINDFS_PID=$!
 }
 
-# --- Main ---
+# =============================================================================
+# Main
+# =============================================================================
 
 main() {
   validate_env
@@ -305,12 +352,7 @@ main() {
 
   trap cleanup TERM INT EXIT
 
-  if [ -f "${DATA_DB}" ]; then
-    start_daemon
-  else
-    first_time_login
-  fi
-
+  start_pcloudcc
   unlock_crypto
 
   # Clear sensitive data from the environment after startup is complete.
