@@ -159,18 +159,37 @@ stop_pcloudcc() {
   PCLOUD_PID=""
 }
 
+# Wait until <mount> is a live FUSE mount and ready. With no third argument
+# "ready" means "directory listing is non-empty"; with a third argument it
+# means "<mount>/<required_path> exists" — useful when a specific subpath
+# must be visible before the next step (e.g. 'Crypto Folder' before
+# 'crypto start').
 wait_for_mount() {
-  echo "[$2] Waiting for mount at $1 (timeout: ${MOUNT_TIMEOUT}s)..."
+  _mnt="$1"
+  _tag="$2"
+  _required_path="${3:-}"
+  if [ -n "${_required_path}" ]; then
+    echo "[${_tag}] Waiting for '${_required_path}' under ${_mnt} (timeout: ${MOUNT_TIMEOUT}s)..."
+  else
+    echo "[${_tag}] Waiting for mount at ${_mnt} (timeout: ${MOUNT_TIMEOUT}s)..."
+  fi
   _elapsed=0
-  until mountpoint -q "$1" && [ -n "$(ls -A "$1" 2>/dev/null)" ]; do
+  while :; do
+    if mountpoint -q "${_mnt}"; then
+      if [ -n "${_required_path}" ]; then
+        [ -e "${_mnt}/${_required_path}" ] && break
+      else
+        [ -n "$(ls -A "${_mnt}" 2>/dev/null)" ] && break
+      fi
+    fi
     _elapsed=$((_elapsed + 2))
     if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
-      echo "ERROR: [$2] Mount at $1 did not become ready within ${MOUNT_TIMEOUT}s" >&2
+      echo "ERROR: [${_tag}] Mount at ${_mnt} did not become ready within ${MOUNT_TIMEOUT}s" >&2
       return 1
     fi
     sleep 2
   done
-  echo "[$2] Mount ready."
+  echo "[${_tag}] Mount ready."
 }
 
 # ============================================================================
@@ -292,8 +311,12 @@ unlock_crypto() {
   [ -n "${PCLOUD_CRYPT}" ] || return 0
 
   echo "Crypto password: provided"
-  if ! wait_for_mount "${PCLOUD_MOUNT}" "pcloud"; then
-    echo "WARNING: skipping crypto unlock — pcloud mount did not become ready." >&2
+  # Wait specifically for 'Crypto Folder' to appear in the listing rather
+  # than for any content under PCLOUD_MOUNT — the mount can become a live
+  # FUSE before pcloudcc has populated the root listing, and 'crypto start'
+  # is only meaningful once the Crypto Folder is actually visible.
+  if ! wait_for_mount "${PCLOUD_MOUNT}" "crypto" "Crypto Folder"; then
+    echo "WARNING: skipping crypto unlock — 'Crypto Folder' did not appear in time." >&2
     unset PCLOUD_CRYPT
     return 0
   fi
