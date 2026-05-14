@@ -173,21 +173,6 @@ wait_for_mount() {
   echo "[$2] Mount ready."
 }
 
-# Block until <path> exists, or fail after MOUNT_TIMEOUT.
-wait_for_path() {
-  echo "[$2] Waiting for '$1' (timeout: ${MOUNT_TIMEOUT}s)..."
-  _elapsed=0
-  until [ -e "$1" ]; do
-    _elapsed=$((_elapsed + 2))
-    if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
-      echo "ERROR: [$2] '$1' did not appear within ${MOUNT_TIMEOUT}s" >&2
-      return 1
-    fi
-    sleep 2
-  done
-  echo "[$2] '$1' ready."
-}
-
 # ============================================================================
 # Shutdown
 # ============================================================================
@@ -307,11 +292,13 @@ unlock_crypto() {
   [ -n "${PCLOUD_CRYPT}" ] || return 0
 
   echo "Crypto password: provided"
-  # 'Crypto Folder' is always present in the pcloud listing (locked or not),
-  # so its appearance is the precise signal that pcloudcc has populated the
-  # mount and 'crypto start' can take effect.
-  if ! wait_for_path "${PCLOUD_MOUNT}/Crypto Folder" "crypto"; then
-    echo "WARNING: skipping crypto unlock — 'Crypto Folder' did not appear in time." >&2
+  if ! wait_for_mount "${PCLOUD_MOUNT}" "crypto"; then
+    echo "WARNING: skipping crypto unlock — pcloud mount did not become ready." >&2
+    unset PCLOUD_CRYPT
+    return 0
+  fi
+  if [ ! -e "${PCLOUD_MOUNT}/Crypto Folder" ]; then
+    echo "WARNING: skipping crypto unlock — 'Crypto Folder' not in pcloud listing." >&2
     unset PCLOUD_CRYPT
     return 0
   fi
