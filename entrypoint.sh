@@ -105,6 +105,33 @@ cleanup() {
   fi
 }
 
+# Stop the pcloudcc background process and tear down its FUSE mount.
+# Used between first-time-login mode and the normal daemon, where the
+# `-s` invocation must be replaced by a plain daemon before IPC commands
+# (e.g. `crypto start`) can reach it reliably.
+stop_pcloudcc() {
+  [ -n "${PCLOUD_PID:-}" ] || return 0
+  if kill -0 "${PCLOUD_PID}" 2>/dev/null; then
+    kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "${PCLOUD_PID}" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
+  fi
+  wait "${PCLOUD_PID}" 2>/dev/null || true
+  if mountpoint -q "${PCLOUD_MOUNT}" 2>/dev/null; then
+    fusermount -u "${PCLOUD_MOUNT}" 2>/dev/null || true
+  fi
+  PCLOUD_PID=""
+}
+
+start_pcloudcc() {
+  echo "Starting pCloud command client"
+  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
+  PCLOUD_PID=$!
+}
+
 # Prints a fresh 6-digit TOTP code on stdout (computed from PCLOUD_TOTP_SECRET
 # via oathtool, or echoed from PCLOUD_2FA as a single-shot fallback). Returns 0
 # on success — including the no-2FA case, where stdout is empty — and 1 only on
@@ -211,6 +238,14 @@ if [ ! -f /root/.pcloud/data.db ]; then
       sleep 2
     done
     echo "First-time login: credentials saved to /root/.pcloud/data.db"
+
+    # The first-time-login invocation (`pcloudcc … -s [-t TFA]`) leaves the
+    # daemon in a transient state that does not reliably answer IPC commands
+    # like `crypto start`. Replace it with a clean daemon before continuing
+    # so the optional crypto unlock below has a stable target.
+    echo "Restarting pcloudcc in normal mode after first-time login..."
+    stop_pcloudcc
+    start_pcloudcc
   else
     echo "No saved credentials found. Either set PCLOUD_PASSWORD (and"
     echo "PCLOUD_TOTP_SECRET or PCLOUD_2FA if 2FA is enabled) for automatic login,"
@@ -225,9 +260,7 @@ if [ ! -f /root/.pcloud/data.db ]; then
   fi
 else
   # --- Start pcloudcc daemon ---
-  echo "Starting pCloud command client"
-  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
-  PCLOUD_PID=$!
+  start_pcloudcc
 fi
 
 # --- Optional crypto unlock ---
