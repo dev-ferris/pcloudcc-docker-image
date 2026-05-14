@@ -340,6 +340,13 @@ start_bindfs() {
   BINDFS_PID=$!
 }
 
+# Clear sensitive data from the environment after startup is complete.
+# pcloudcc already has what it needs; anything still set here would leak
+# into child processes (e.g. bindfs) and into `docker inspect` output.
+clear_sensitive_env() {
+  unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
+}
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -354,10 +361,7 @@ main() {
 
   start_pcloudcc
   unlock_crypto
-
-  # Clear sensitive data from the environment after startup is complete.
-  unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
-
+  clear_sensitive_env
   start_bindfs
 
   wait "${PCLOUD_PID}"
