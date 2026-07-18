@@ -32,16 +32,20 @@ RUN git init -q \
     && git fetch --depth 1 \
         https://github.com/lneely/pcloudcc-lneely.git "${PCLOUDCC_REF}" \
     && git checkout -q FETCH_HEAD \
-    && make \
+    && make -j"$(nproc)" \
     && strip pcloudcc
 
 # ===== Stage 2: Runtime =====
 FROM debian:trixie-slim
 
+# licenses/source describe this image (the packaging layer, MIT). The bundled
+# pcloudcc binary itself is BSD-3-Clause; its origin is recorded separately.
 LABEL org.opencontainers.image.title="pcloudcc" \
       org.opencontainers.image.description="pCloud console client (lneely fork) with bindfs" \
-      org.opencontainers.image.source="https://github.com/lneely/pcloudcc-lneely" \
-      org.opencontainers.image.licenses="BSD-3-Clause"
+      org.opencontainers.image.source="https://github.com/dev-ferris/pcloudcc-docker-image" \
+      org.opencontainers.image.licenses="MIT" \
+      pcloudcc.upstream.source="https://github.com/lneely/pcloudcc-lneely" \
+      pcloudcc.upstream.licenses="BSD-3-Clause"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fuse3 \

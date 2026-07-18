@@ -4,6 +4,12 @@ Stand: 2026-07-18 · Analysierter Stand: `main` · Werkzeuge: manuelles Review,
 shellcheck 0.9.0 (`--shell=sh`, clean bis `--severity=info`), praktische
 Verifikation einzelner Fixes (oathtool-stdin).
 
+> **Umsetzungsstatus:** Die Punkte **#1, #2, #3, #6, #7, #9, #10 und #11**
+> sind auf diesem Branch umgesetzt und getestet (shellcheck clean,
+> YAML-validiert, oathtool-stdin- und MOUNT_TIMEOUT-Validierung funktional
+> geprüft). Offen bleiben die bewusst zurückgestellten Punkte #4, #5, #8
+> und #12.
+
 ## Gesamturteil
 
 Das Repository ist bereits auf sehr hohem Niveau: Multi-Stage-Build,

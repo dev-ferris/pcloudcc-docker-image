@@ -61,6 +61,9 @@ validate_inputs() {
   case "${GID}" in
     ''|*[!0-9]*) echo "ERROR: GID must be numeric, got '${GID}'" >&2; exit 1 ;;
   esac
+  case "${MOUNT_TIMEOUT}" in
+    ''|*[!0-9]*) echo "ERROR: MOUNT_TIMEOUT must be numeric (seconds), got '${MOUNT_TIMEOUT}'" >&2; exit 1 ;;
+  esac
   case "${USER}" in
     ''|*[!a-zA-Z0-9._-]*) echo "ERROR: USER contains invalid characters, got '${USER}'" >&2; exit 1 ;;
   esac
@@ -117,7 +120,8 @@ compute_tfa_code() {
       echo "ERROR: PCLOUD_TOTP_SECRET set but 'oathtool' is not installed" >&2
       return 1
     fi
-    if ! _code="$(oathtool --totp -b "${PCLOUD_TOTP_SECRET}" 2>/dev/null)"; then
+    # Pass the secret via stdin so it never appears in /proc/<pid>/cmdline.
+    if ! _code="$(printf '%s' "${PCLOUD_TOTP_SECRET}" | oathtool --totp -b - 2>/dev/null)"; then
       echo "ERROR: failed to generate TOTP code (invalid base32 secret?)" >&2
       return 1
     fi

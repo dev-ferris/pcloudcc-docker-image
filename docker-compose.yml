@@ -8,6 +8,12 @@ services:
       args:
         PCLOUDCC_REF: main
     restart: unless-stopped
+    # tini as PID 1: reaps zombies and forwards signals to the entrypoint.
+    init: true
+    # entrypoint.sh grants pcloudcc up to 10s for a graceful shutdown plus
+    # FUSE unmounts; Docker's default grace period is also 10s, which would
+    # SIGKILL the container mid-teardown and leave stale mounts on the host.
+    stop_grace_period: 30s
     volumes:
       - pconfig:/root/.pcloud:rw
       - /path/to/your/pcloud:/pcloud:rshared
