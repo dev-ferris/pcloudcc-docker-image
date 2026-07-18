@@ -51,7 +51,7 @@ Feinschliff, keine kritischen Lücken.
 
 | # | Befund | Ort |
 |---|--------|-----|
-| 9 | **`make` ohne Parallelisierung.** Single-threaded — besonders teuer für arm64/arm-v7 unter QEMU. `make -j"$(nproc)"` würde die CI-Zeit deutlich senken; vorher prüfen, ob das Upstream-Makefile parallel-safe ist. | `Dockerfile:35` |
+| 9 | **`make` ohne Parallelisierung.** Single-threaded — besonders teuer für arm64/arm-v7 unter QEMU. **Parallel-Safety getestet und bestätigt** (siehe unten): `make -j"$(nproc)"` ist sicher und brachte im Test einen 4,2×-Speedup. | `Dockerfile:35` |
 | 10 | **Smoke-Test läuft nach dem Push.** Ein funktional kaputtes Image ist zum Testzeitpunkt bereits als `latest` publiziert; der Trivy-Gate greift vor dem Push, der Funktionstest nicht. Besser: Smoke-Test gegen das vorhandene `/tmp/scan-image.tar` (`docker load`) vor den Push-Step ziehen. | `docker-build.yml:195-213` |
 | 11 | **Fehlende `timeout-minutes`.** Hängende (QEMU-)Builds blockieren den Runner bis zum 6-h-GitHub-Default. Z. B. 120 min für Build, 10 min für Lint/Check. | alle Workflows |
 | 12 | **check-upstream Cache-Eviction.** Actions-Caches verfallen nach ~7 Tagen Nichtnutzung → derselbe Upstream-SHA kann erneut einen Build triggern. Harmlos (wöchentlicher Rebuild existiert ohnehin). | `check-upstream.yml` |
@@ -72,11 +72,26 @@ Feinschliff, keine kritischen Lücken.
 | 6 | #7 `init: true` | 1 Zeile | Zombie-Reaping-Absicherung. |
 | 7 | #2 OCI-Label-Korrektur | 2 Zeilen | Korrekte Metadaten auch bei lokalem Build. |
 
-### Bedingt empfohlen (vorher prüfen)
+### Zusätzlich empfohlen nach Test
 
-- **#9 `make -j`:** Nur nach Test, ob das Upstream-Makefile parallel-safe
-  ist (z. B. in einem PR-Build verifizieren). Bei Erfolg deutliche
-  CI-Zeitersparnis.
+- **#9 `make -j"$(nproc)"`:** Getestet am 2026-07-18 gegen Upstream-Commit
+  `93a99cd6` (mbedTLS 3.6.2, gcc 13, Ubuntu 24.04, 4 Kerne):
+  - *Strukturanalyse:* Jede Objektdatei hat genau eine Pattern-Rule, der
+    finale Link hängt von allen Objekten ab, `$(shell …)`-Aufrufe laufen
+    einmalig zur Parse-Zeit, keine Basename-Kollisionen zwischen
+    `pclsync/*.c` (68 Dateien) und `*.cpp` (4 Dateien) trotz flacher
+    `notdir`-Objektablage.
+  - *Empirie:* 3× `make -j4` und 2× Stress-Test `make -j16` (erzwungene
+    maximale Überlappung bei 4 Kernen) — alle 5 Läufe erfolgreich, Binary
+    jeweils **byteidentisch** zum seriellen Build (gleiche SHA-256).
+  - *Speedup:* seriell 39,4 s → parallel 9,4 s (**4,2×** bei 4 Kernen);
+    unter QEMU-Emulation (arm64/arm-v7) ist ein ähnlicher Faktor zu
+    erwarten.
+  - *Umsetzung:* In `Dockerfile:35` `make` durch `make -j"$(nproc)"`
+    ersetzen.
+
+### Bedingt empfohlen
+
 - **#5 Upstream-SHA-Label:** Nice-to-have für Nachvollziehbarkeit;
   moderater Aufwand (ARG/LABEL-Durchreichung oder SHA-Ermittlung im
   Build-Stage).
