@@ -34,6 +34,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Generous ceiling for the QEMU-emulated arm builds; still far below the
+    # 6h GitHub default so a hung build can't block the runner all day.
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write
@@ -144,8 +147,31 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
 
-      # Full multi-platform build and push. Runs only after the Trivy gate
-      # passes and only on non-PR events.
+      # Gate: functional smoke test against the locally built amd64 image,
+      # BEFORE anything is pushed — a broken binary must never reach the
+      # registry as `latest`. Also runs on PRs (no registry access needed).
+      - name: Smoke test image (linux/amd64)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          docker load -i /tmp/scan-image.tar
+          IMAGE="$(printf '%s\n' "$TAGS" | head -n1)"
+          docker run --rm --entrypoint /bin/sh "$IMAGE" -c '
+            set -e
+            test -x /usr/local/bin/pcloudcc
+            test -x /entrypoint.sh
+            test -x /usr/bin/bindfs
+            echo "--- ldd /usr/local/bin/pcloudcc ---"
+            ldd /usr/local/bin/pcloudcc
+            if ldd /usr/local/bin/pcloudcc 2>&1 | grep -q "not found"; then
+              echo "ERROR: pcloudcc has unresolved shared libraries"
+              exit 1
+            fi
+            echo "Smoke test OK"
+          '
+
+      # Full multi-platform build and push. Runs only after the Trivy and
+      # smoke-test gates pass and only on non-PR events.
       - name: Build and push (all platforms)
         id: build
         if: github.event_name != 'pull_request'
@@ -191,26 +217,6 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
           category: trivy
-
-      - name: Smoke test image (linux/amd64)
-        if: github.event_name != 'pull_request'
-        env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-        run: |
-          docker pull --platform linux/amd64 "$IMAGE"
-          docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$IMAGE" -c '
-            set -e
-            test -x /usr/local/bin/pcloudcc
-            test -x /entrypoint.sh
-            test -x /usr/bin/bindfs
-            echo "--- ldd /usr/local/bin/pcloudcc ---"
-            ldd /usr/local/bin/pcloudcc
-            if ldd /usr/local/bin/pcloudcc 2>&1 | grep -q "not found"; then
-              echo "ERROR: pcloudcc has unresolved shared libraries"
-              exit 1
-            fi
-            echo "Smoke test OK"
-          '
 
       - name: Update Docker Hub description
         # The description sync hits Docker Hub's /v2/repositories/<ns>/<repo>/

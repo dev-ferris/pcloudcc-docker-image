@@ -49,6 +49,8 @@ services:
     # Or, from Docker Hub:
     # image: <your-dockerhub-user>/pcloudcc-docker-image:latest
     restart: unless-stopped
+    init: true               # zombie reaping + signal forwarding
+    stop_grace_period: 30s   # allow graceful pcloudcc shutdown + FUSE unmount
     volumes:
       - pconfig:/root/.pcloud:rw
       - /path/to/your/pcloud:/pcloud:rshared
