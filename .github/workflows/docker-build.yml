@@ -129,20 +129,39 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
+          # Scheduled runs exist solely to pick up Debian security updates, but
+          # every layer — including `apt-get install` — is a cache hit as long as
+          # the registry cache is attached and the base image digest is unchanged.
+          # That made the "weekly security rebuild" republish a byte-identical
+          # image: 8 of the last 10 scheduled runs finished in 2 minutes, i.e.
+          # without building anything. Bypass the cache on schedule so apt
+          # actually re-resolves against the current archive.
+          no-cache: ${{ github.event_name == 'schedule' }}
           # Read from the shared cache; don't write — the full multi-platform
           # build below will update it.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache', env.REGISTRY, env.IMAGE_NAME) || '' }}
 
-      # Gate: fail the build before any push if CRITICAL or HIGH unfixed CVEs
-      # are found. Runs on every event including pull_requests so PRs are also
-      # blocked. The SARIF file is written regardless of exit code so the
-      # upload step below can always pick it up.
-      - name: Run Trivy vulnerability gate
+      # Report: full SARIF for the Security tab — every severity, including
+      # findings without an available fix. Non-blocking; the gate below decides
+      # whether the build may proceed.
+      - name: Run Trivy scan (full report)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: /tmp/scan-image.tar
           format: sarif
           output: trivy-results.sarif
+          ignore-unfixed: false
+          exit-code: '0'
+
+      # Gate: fail the build before any push if CRITICAL or HIGH CVEs with an
+      # available fix are found. Runs on every event including pull_requests so
+      # PRs are also blocked. Table output so a failing gate is readable in the
+      # job log; the SARIF above is what reaches the Security tab.
+      - name: Run Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: /tmp/scan-image.tar
+          format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: '1'
@@ -161,6 +180,8 @@ jobs:
             test -x /usr/local/bin/pcloudcc
             test -x /entrypoint.sh
             test -x /usr/bin/bindfs
+            echo "--- upstream commit baked into this image ---"
+            cat /usr/local/share/pcloudcc/upstream-commit
             echo "--- ldd /usr/local/bin/pcloudcc ---"
             ldd /usr/local/bin/pcloudcc
             if ldd /usr/local/bin/pcloudcc 2>&1 | grep -q "not found"; then
@@ -189,9 +210,12 @@ jobs:
             PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
           provenance: mode=max
           sbom: true
-          # BuildKit reuses layers from the scan build above (same daemon),
-          # so this is effectively just the push, not a full rebuild.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          # BuildKit reuses layers from the scan build above (same daemon), so
+          # this is effectively just the push for amd64, not a full rebuild.
+          # On scheduled runs the registry cache is skipped for the same reason
+          # as above; the freshly built amd64 layers still come from the local
+          # BuildKit cache, only arm64/arm-v7 are rebuilt from scratch.
+          cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache', env.REGISTRY, env.IMAGE_NAME) || '' }}
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Install Cosign

@@ -263,11 +263,20 @@ The compose file enables `stdin_open: true` and `tty: true` so you can attach to
 
 ### Supply chain
 
-The image is built from the `lneely/pcloudcc-lneely` upstream. The `check-upstream.yml` workflow polls the upstream `main` branch every 6 hours and triggers an automatic rebuild on new commits. Every published image is:
+The image is built from the `lneely/pcloudcc-lneely` upstream. The `check-upstream.yml` workflow polls the upstream `main` branch every 6 hours and triggers an automatic rebuild on new commits, dispatching the **resolved commit SHA** rather than the branch name — `PCLOUDCC_REF` is part of the Docker layer cache key, so a moving branch name would let a "successful" rebuild silently reuse the previously compiled binary. The weekly scheduled build additionally runs with the layer cache disabled, so it genuinely re-resolves `apt-get install` against the current Debian archive instead of republishing an identical image.
 
-- Scanned with Trivy — CRITICAL/HIGH CVEs with an available fix block the build; the scan results (including informational findings) are uploaded to the GitHub Security tab
+Every published image is:
+
+- Scanned with Trivy — CRITICAL/HIGH CVEs with an available fix block the build; the full scan results (all severities, including findings without an available fix) are uploaded to the GitHub Security tab
 - Signed with cosign keyless signing (verifiable via `cosign verify`)
 - Shipped with an SBOM and provenance attestation
+
+The exact upstream commit compiled into an image is recorded inside it:
+
+```bash
+docker run --rm --entrypoint cat ghcr.io/dev-ferris/pcloudcc-docker-image:latest \
+  /usr/local/share/pcloudcc/upstream-commit
+```
 
 To pin to a specific upstream revision, set `PCLOUDCC_REF` to a tag or commit SHA in your `docker-compose.yml` build args.
 
@@ -279,6 +288,12 @@ To pull the latest version of pcloudcc:
 docker compose build --no-cache
 docker compose up -d
 ```
+
+`--no-cache` is required, not optional: with `PCLOUDCC_REF: main` the layer that
+fetches and compiles upstream has an unchanged cache key even after upstream
+moves on, so a plain `docker compose build` would rebuild nothing. Alternatively,
+pin `PCLOUDCC_REF` to the commit SHA you want — a changed SHA busts the cache on
+its own.
 
 To pin to a specific version or commit of the lneely fork, edit `docker-compose.yml`:
 

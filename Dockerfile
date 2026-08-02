@@ -32,6 +32,7 @@ RUN git init -q \
     && git fetch --depth 1 \
         https://github.com/lneely/pcloudcc-lneely.git "${PCLOUDCC_REF}" \
     && git checkout -q FETCH_HEAD \
+    && git rev-parse HEAD > /build/pcloudcc.commit \
     && make -j"$(nproc)" \
     && strip pcloudcc
 
@@ -67,6 +68,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /pcloud_internal
 
 COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
+# Resolved upstream commit the bundled binary was built from. PCLOUDCC_REF may
+# be a moving branch name, so record what it actually pointed at at build time.
+COPY --from=builder /build/pcloudcc.commit /usr/local/share/pcloudcc/upstream-commit
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
 
@@ -87,7 +91,12 @@ ENV PCLOUD_USER="" \
     GROUP="users" \
     MOUNT_TIMEOUT="60"
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# Each probe issues a FUSE readdir on the pCloud root (plus one on "Crypto
+# Folder" when crypto is configured), which pcloudcc may service over the
+# network. 60s halves that background traffic; the cost is that a persistent
+# failure is reported after ~3min instead of ~1.5min (interval x retries),
+# which is acceptable for a background sync daemon.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
     CMD ["/healthcheck.sh"]
 
 ENTRYPOINT ["/entrypoint.sh"]
