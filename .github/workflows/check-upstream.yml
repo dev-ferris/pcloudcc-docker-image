@@ -6,6 +6,12 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+# A manual run overlapping the 6-hourly one would resolve the same SHA twice and
+# dispatch two identical builds. Serialize and drop the redundant older run.
+concurrency:
+  group: check-upstream
+  cancel-in-progress: true
+
 jobs:
   check-upstream-main:
     name: Check upstream main branch
@@ -45,10 +51,17 @@ jobs:
         run: |
           echo "${UPSTREAM_SHA}" > upstream-sha.txt
           echo "New upstream commit detected: ${UPSTREAM_SHA}"
+          # Pass the resolved SHA, not the branch name. PCLOUDCC_REF is a
+          # Docker build arg, so it is part of the cache key of the layer that
+          # fetches and compiles upstream. Triggering with the literal "main"
+          # produced the same cache key as the previous build and the new
+          # upstream code was never compiled — the build "succeeded" while
+          # shipping the old binary. A SHA is unique per commit and therefore
+          # both busts the cache and pins the build reproducibly.
           gh workflow run docker-build.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            -f pcloudcc_ref=main
-          echo "Build workflow triggered for ref=main."
+            -f pcloudcc_ref="${UPSTREAM_SHA}"
+          echo "Build workflow triggered for ref=${UPSTREAM_SHA}."
 
   check-upstream-tag:
     name: Check upstream tags

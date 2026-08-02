@@ -9,6 +9,12 @@ on:
       - main
   workflow_dispatch:
 
+# Linting is cheap and stateless — superseded runs on the same ref are pure
+# waste, so cancel them (unlike the multi-arch image build, which is not).
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
