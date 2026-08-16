@@ -74,15 +74,15 @@ COPY --from=builder /build/pcloudcc.commit /usr/local/share/pcloudcc/upstream-co
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 COPY --chmod=755 healthcheck.sh /healthcheck.sh
 
-ENV PCLOUD_USER="" \
-    PCLOUD_PASSWORD="" \
-    PCLOUD_PASSWORD_FILE="" \
-    PCLOUD_2FA="" \
-    PCLOUD_TOTP_SECRET="" \
-    PCLOUD_TOTP_SECRET_FILE="" \
-    PCLOUD_CRYPT="" \
-    PCLOUD_CRYPT_FILE="" \
-    PCLOUD_MOUNT="/pcloud_internal" \
+# Only the non-credential settings get a baked-in default. The credential
+# variables (PCLOUD_USER, PCLOUD_PASSWORD[_FILE], PCLOUD_2FA,
+# PCLOUD_TOTP_SECRET[_FILE], PCLOUD_CRYPT[_FILE]) are supplied at runtime and
+# are deliberately not declared here: an empty ENV placeholder adds no
+# behaviour — entrypoint.sh and healthcheck.sh default them to empty
+# themselves — while putting secret-named variables into the image metadata is
+# exactly what hadolint DL3064 flags. See README.md and .env.sample for the
+# full list.
+ENV PCLOUD_MOUNT="/pcloud_internal" \
     ENABLE_BINDFS="0" \
     BINDFS_TARGET="/pcloud" \
     UID="1000" \
