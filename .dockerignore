@@ -1,7 +1,7 @@
-.git
-.github
-.env
-.env.*
-*.md
-LICENSE
-docker-compose.yml
+# Deny-by-default: the build context is only what the Dockerfile actually
+# COPYs. Anything added to the repo later (docs, CI config, editor files)
+# then stays out of the context automatically instead of having to be
+# blacklisted here one by one.
+*
+!entrypoint.sh
+!healthcheck.sh

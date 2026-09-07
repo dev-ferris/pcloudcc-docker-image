@@ -27,9 +27,11 @@ else
 fi
 
 # The pCloud filesystem must be mounted and populated. An empty directory
-# means pcloudcc has not (yet) finished mounting.
+# means pcloudcc has not (yet) finished mounting. `find -print -quit` stops at
+# the first entry; `ls -A` would read the whole pCloud root — a readdir served
+# over the network by pcloudcc — on every probe just to test for emptiness.
 mountpoint -q "${mnt}" || exit 1
-[ -n "$(ls -A "${mnt}" 2>/dev/null)" ] || exit 1
+[ -n "$(find "${mnt}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] || exit 1
 
 # When a crypto password is configured (either inline or via secrets file),
 # the "Crypto Folder" must be unlocked. The folder itself always exists in

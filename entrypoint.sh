@@ -25,6 +25,68 @@ PCLOUD_PID=""
 BINDFS_PID=""
 
 # ============================================================================
+# Filesystem / process helpers
+# ============================================================================
+
+# Upstream libfuse installs the helper as `fusermount3`; Debian's fuse3 package
+# additionally ships it under the fuse 2.x name `fusermount` (which is why it
+# conflicts with the old fuse package). Both names work on this base image, but
+# only the versioned one is guaranteed elsewhere, so resolve whichever exists
+# once and fall back to `umount` (we run as root with CAP_SYS_ADMIN).
+FUSERMOUNT=""
+resolve_fusermount() {
+  [ -z "${FUSERMOUNT}" ] || return 0
+  for _cmd in fusermount3 fusermount; do
+    if command -v "${_cmd}" >/dev/null 2>&1; then
+      FUSERMOUNT="${_cmd}"
+      return 0
+    fi
+  done
+  FUSERMOUNT="umount"
+}
+
+# Unmount a FUSE mount point, retrying lazily when the mount is still busy and
+# warning when even that fails — the previous inline `fusermount -u ... || true`
+# gave up on a busy mount without a trace, leaving it stale on the host.
+# No-op when nothing is mounted there.
+fuse_unmount() {
+  _mnt="$1"
+  mountpoint -q "${_mnt}" 2>/dev/null || return 0
+  resolve_fusermount
+  if [ "${FUSERMOUNT}" = "umount" ]; then
+    umount "${_mnt}" 2>/dev/null || umount -l "${_mnt}" 2>/dev/null || true
+  else
+    "${FUSERMOUNT}" -u "${_mnt}" 2>/dev/null \
+      || "${FUSERMOUNT}" -u -z "${_mnt}" 2>/dev/null \
+      || true
+  fi
+  if mountpoint -q "${_mnt}" 2>/dev/null; then
+    echo "WARNING: could not unmount '${_mnt}' - it may be left stale on the host" >&2
+  fi
+}
+
+# Non-empty directory test that stops at the first entry instead of reading and
+# formatting the whole listing the way `ls -A` does. A minor saving, but this
+# runs on the startup poll loop and (via healthcheck.sh) every 60s against a
+# mount that pcloudcc services itself. findutils is Essential in Debian, so
+# `find` is as guaranteed to be present as `ls`.
+dir_not_empty() {
+  [ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+}
+
+# Wait up to $2 seconds for pid $1 to exit. Returns 0 if it did, 1 on timeout.
+wait_for_exit() {
+  _pid="$1"
+  _secs="$2"
+  while [ "${_secs}" -gt 0 ]; do
+    kill -0 "${_pid}" 2>/dev/null || return 0
+    _secs=$((_secs - 1))
+    sleep 1
+  done
+  ! kill -0 "${_pid}" 2>/dev/null
+}
+
+# ============================================================================
 # Validation helpers
 # ============================================================================
 
@@ -151,23 +213,17 @@ stop_pcloudcc() {
   [ -n "${PCLOUD_PID}" ] || return 0
   if kill -0 "${PCLOUD_PID}" 2>/dev/null; then
     kill -TERM "${PCLOUD_PID}" 2>/dev/null || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      kill -0 "${PCLOUD_PID}" 2>/dev/null || break
-      sleep 1
-    done
-    kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
+    wait_for_exit "${PCLOUD_PID}" 10 || kill -KILL "${PCLOUD_PID}" 2>/dev/null || true
   fi
   wait "${PCLOUD_PID}" 2>/dev/null || true
-  if mountpoint -q "${PCLOUD_MOUNT}" 2>/dev/null; then
-    fusermount -u "${PCLOUD_MOUNT}" 2>/dev/null || true
-  fi
+  fuse_unmount "${PCLOUD_MOUNT}"
   PCLOUD_PID=""
 }
 
 wait_for_mount() {
   echo "[$2] Waiting for mount at $1 (timeout: ${MOUNT_TIMEOUT}s)..."
   _elapsed=0
-  until mountpoint -q "$1" && [ -n "$(ls -A "$1" 2>/dev/null)" ]; do
+  until mountpoint -q "$1" && dir_not_empty "$1"; do
     _elapsed=$((_elapsed + 2))
     if [ "${_elapsed}" -ge "${MOUNT_TIMEOUT}" ]; then
       echo "ERROR: [$2] Mount at $1 did not become ready within ${MOUNT_TIMEOUT}s" >&2
@@ -186,11 +242,15 @@ cleanup() {
   trap - TERM INT EXIT
   echo "Shutting down..."
 
-  if [ -n "${BINDFS_PID}" ]; then
-    kill "${BINDFS_PID}" 2>/dev/null || true
+  # Unmount before signalling: a clean unmount makes bindfs exit by itself and
+  # leaves no stale mount point behind. Killing it first would tear the process
+  # down while the kernel still has the FUSE mount attached.
+  if [ "${ENABLE_BINDFS}" = "1" ]; then
+    fuse_unmount "${BINDFS_TARGET}"
   fi
-  if [ "${ENABLE_BINDFS}" = "1" ] && mountpoint -q "${BINDFS_TARGET}" 2>/dev/null; then
-    fusermount -u "${BINDFS_TARGET}" 2>/dev/null || true
+  if [ -n "${BINDFS_PID}" ] && kill -0 "${BINDFS_PID}" 2>/dev/null; then
+    kill -TERM "${BINDFS_PID}" 2>/dev/null || true
+    wait_for_exit "${BINDFS_PID}" 5 || kill -KILL "${BINDFS_PID}" 2>/dev/null || true
   fi
 
   # Graceful pcloudcc shutdown - give it time to finish pending transfers
@@ -336,12 +396,15 @@ start_bindfs_overlay() {
 # Main
 # ============================================================================
 
-trap cleanup TERM INT EXIT
-
 validate_inputs
 load_secrets
 prepare_mount_point
 log_provided_secrets
+
+# Installed only once startup validation has passed: a failed validation exits
+# before anything is mounted or spawned, and running cleanup() there would just
+# print a misleading "Shutting down..." after the actual error.
+trap cleanup TERM INT EXIT
 
 if [ ! -f /root/.pcloud/data.db ]; then
   first_time_login

@@ -47,7 +47,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Only the multi-platform push build below needs emulation, and that step
+      # is skipped on pull requests — the scan build is amd64-only and runs
+      # natively. Registering binfmt handlers must still happen before buildx
+      # boots its builder, so this stays ahead of setup-buildx-action.
       - name: Set up QEMU
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v3
         with:
           platforms: linux/amd64,linux/arm64,linux/arm/v7
@@ -179,7 +184,25 @@ jobs:
             set -e
             test -x /usr/local/bin/pcloudcc
             test -x /entrypoint.sh
+            test -x /healthcheck.sh
             test -x /usr/bin/bindfs
+            # Both scripts run under /bin/sh in this image; a syntax error would
+            # otherwise only surface at container start.
+            sh -n /entrypoint.sh
+            sh -n /healthcheck.sh
+            # entrypoint.sh needs a fusermount binary to tear FUSE mounts down
+            # on shutdown. The Debian fuse3 package currently provides both
+            # fusermount3 and the fuse 2.x compat name; assert at least one
+            # survives a base image change, rather than finding out about it
+            # from stale mounts left on a users host.
+            command -v fusermount3 || command -v fusermount || {
+              echo "ERROR: no fusermount binary in the runtime image"; exit 1; }
+            command -v mountpoint
+            command -v oathtool
+            # No data.db in a fresh container: the healthcheck must report the
+            # bootstrap state as healthy so Docker does not kill the container
+            # before first-time login can finish.
+            /healthcheck.sh
             echo "--- upstream commit baked into this image ---"
             cat /usr/local/share/pcloudcc/upstream-commit
             echo "--- ldd /usr/local/bin/pcloudcc ---"
