@@ -42,3 +42,10 @@ services:
     # Required for first-time interactive login; can be removed after initial credential setup.
     stdin_open: true
     tty: true
+    # pcloudcc logs continuously and this container is meant to run for months.
+    # Without a cap the json-file log grows unbounded and fills the host disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

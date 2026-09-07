@@ -75,6 +75,11 @@ services:
       - CHOWN        # entrypoint chowns the internal mount point
     stdin_open: true
     tty: true
+    logging:                 # cap the log file for a long-running daemon
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 ```
 
 > **Note:** `/pcloud_internal` must be in the `tmpfs` list when `read_only: true` is used, otherwise the entrypoint can't create or chown the mount point.
@@ -314,7 +319,9 @@ If `data.db` is not being created after login, make sure the `pconfig` volume is
 
 **Mount stuck after stop:**
 ```bash
-fusermount -u /path/to/your/pcloud
+# Debian/Ubuntu's fuse3 package provides both names; on other distributions
+# the fuse 3.x helper is only installed as `fusermount3`.
+fusermount3 -u /path/to/your/pcloud || fusermount -u /path/to/your/pcloud
 ```
 
 ## Migrating from DjSni/docker-image-pCloud

@@ -63,9 +63,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bindfs \
     oathtool \
     util-linux \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /pcloud_internal
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /pcloud_internal
 
 COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
 # Resolved upstream commit the bundled binary was built from. PCLOUDCC_REF may

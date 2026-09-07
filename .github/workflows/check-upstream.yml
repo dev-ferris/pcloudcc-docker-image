@@ -12,46 +12,81 @@ concurrency:
   group: check-upstream
   cancel-in-progress: true
 
+env:
+  UPSTREAM_REPO: lneely/pcloudcc-lneely
+
 jobs:
-  check-upstream-main:
-    name: Check upstream main branch
+  check-upstream:
+    name: Check upstream ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: write
+    strategy:
+      # The two probes are independent: a missing tag must not hide a new
+      # commit on main (and vice versa).
+      fail-fast: false
+      matrix:
+        include:
+          # Tip of the default branch. It always exists, so an empty result is
+          # a hard failure rather than a "nothing to do".
+          - label: main branch
+            api: 'commits/main'
+            jq: '.sha // empty'
+            required: true
+            cache_path: upstream-sha.txt
+            cache_prefix: upstream-sha
+          # /tags returns the most recently created tag first. A fork without
+          # any tags is legitimate, so an empty result just ends the run.
+          - label: tags
+            api: 'tags?per_page=1'
+            jq: '.[0].name // empty'
+            required: false
+            cache_path: upstream-tag.txt
+            cache_prefix: upstream-tag
 
     steps:
-      - name: Get upstream latest commit SHA
+      - name: Resolve upstream ref
         id: upstream
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_PATH: ${{ matrix.api }}
+          JQ_FILTER: ${{ matrix.jq }}
+          REQUIRED: ${{ matrix.required }}
         run: |
-          SHA=$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/lneely/pcloudcc-lneely/commits/main" \
-            | jq -r '.sha')
-          if [ -z "${SHA}" ] || [ "${SHA}" = "null" ]; then
-            echo "ERROR: Failed to fetch upstream commit SHA" >&2
-            exit 1
+          REF=$(curl -sf -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/${API_PATH}" \
+            | jq -r "${JQ_FILTER}")
+          if [ -z "${REF}" ] || [ "${REF}" = "null" ]; then
+            if [ "${REQUIRED}" = "true" ]; then
+              echo "ERROR: could not resolve upstream ref from '${API_PATH}'" >&2
+              exit 1
+            fi
+            echo "Nothing found at '${API_PATH}' — nothing to do."
+            echo "ref=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "Upstream main SHA: ${SHA}"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Upstream ${API_PATH} resolved to: ${REF}"
 
-      - name: Check against cached SHA
+      - name: Check against cached ref
+        if: steps.upstream.outputs.ref != ''
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: upstream-sha.txt
-          key: upstream-sha-${{ steps.upstream.outputs.sha }}
+          path: ${{ matrix.cache_path }}
+          key: ${{ matrix.cache_prefix }}-${{ steps.upstream.outputs.ref }}
 
-      - name: Trigger build on new upstream commit
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Trigger build on new upstream ref
+        if: steps.upstream.outputs.ref != '' && steps.cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+          UPSTREAM_REF: ${{ steps.upstream.outputs.ref }}
+          CACHE_PATH: ${{ matrix.cache_path }}
         run: |
-          echo "${UPSTREAM_SHA}" > upstream-sha.txt
-          echo "New upstream commit detected: ${UPSTREAM_SHA}"
-          # Pass the resolved SHA, not the branch name. PCLOUDCC_REF is a
+          echo "New upstream ref detected: ${UPSTREAM_REF}"
+          # Pass the resolved SHA/tag, not the branch name. PCLOUDCC_REF is a
           # Docker build arg, so it is part of the cache key of the layer that
           # fetches and compiles upstream. Triggering with the literal "main"
           # produced the same cache key as the previous build and the new
@@ -60,52 +95,11 @@ jobs:
           # both busts the cache and pins the build reproducibly.
           gh workflow run docker-build.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            -f pcloudcc_ref="${UPSTREAM_SHA}"
-          echo "Build workflow triggered for ref=${UPSTREAM_SHA}."
-
-  check-upstream-tag:
-    name: Check upstream tags
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      actions: write
-
-    steps:
-      - name: Get upstream latest tag
-        id: upstream
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # /tags returns the most recently created tag first.
-          TAG=$(curl -sf -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/lneely/pcloudcc-lneely/tags?per_page=1" \
-            | jq -r '.[0].name // empty')
-          if [ -z "${TAG}" ]; then
-            echo "No tags found upstream — nothing to do."
-            echo "tag=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Upstream latest tag: ${TAG}"
-
-      - name: Check against cached tag
-        if: steps.upstream.outputs.tag != ''
-        id: cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: upstream-tag.txt
-          key: upstream-tag-${{ steps.upstream.outputs.tag }}
-
-      - name: Trigger build on new upstream tag
-        if: steps.upstream.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
-        run: |
-          echo "${UPSTREAM_TAG}" > upstream-tag.txt
-          echo "New upstream tag detected: ${UPSTREAM_TAG}"
-          gh workflow run docker-build.yml \
-            --repo "${GITHUB_REPOSITORY}" \
-            -f pcloudcc_ref="${UPSTREAM_TAG}"
-          echo "Build workflow triggered for ref=${UPSTREAM_TAG}."
+            -f pcloudcc_ref="${UPSTREAM_REF}"
+          echo "Build workflow triggered for ref=${UPSTREAM_REF}."
+          # Write the cache marker only once the dispatch actually succeeded,
+          # so the file that records "this ref is handled" can never outlive a
+          # failed `gh workflow run`. (actions/cache's post step is `post-if:
+          # success()`, so today a failed dispatch already skips the save —
+          # this just stops that from being load-bearing.)
+          echo "${UPSTREAM_REF}" > "${CACHE_PATH}"
