@@ -211,6 +211,15 @@ jobs:
               echo "ERROR: pcloudcc has unresolved shared libraries"
               exit 1
             fi
+            # Upstream dropped Boost.Program_options for the vendored CLI11.hpp
+            # (lneely#396), so the Dockerfile no longer installs any boost
+            # package. If upstream ever links boost again the build would still
+            # succeed and only fail at container start with a missing library,
+            # so assert the binary really does not want one.
+            if ldd /usr/local/bin/pcloudcc 2>&1 | grep -q "libboost"; then
+              echo "ERROR: pcloudcc links against boost, but the runtime image no longer ships it"
+              exit 1
+            fi
             echo "Smoke test OK"
           '
 

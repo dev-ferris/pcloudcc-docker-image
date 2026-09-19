@@ -10,6 +10,12 @@ FROM debian:trixie-slim AS builder
 
 ARG PCLOUDCC_REF=main
 
+# Dependency list mirrors upstream doc/BUILD.md: zlib, pthread, udev, fuse,
+# sqlite, mbedTLS, readline. Boost is deliberately absent — upstream replaced
+# Boost.Program_options with the vendored single-header CLI11.hpp (lneely#396,
+# 2026-05-01) and the Makefile no longer links any boost library. Keeping the
+# -dev packages around only lengthened the build and dragged two more shared
+# libraries into the runtime image for Trivy to scan.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
@@ -17,8 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse3-dev \
     libudev-dev \
     libmbedtls-dev \
-    libboost-system-dev \
-    libboost-program-options-dev \
     libreadline-dev \
     libsqlite3-dev \
     zlib1g-dev \
@@ -54,8 +58,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev1 \
     libmbedtls21 \
     libmbedcrypto16 \
-    libboost-system1.83.0 \
-    libboost-program-options1.83.0 \
     libreadline8t64 \
     libsqlite3-0 \
     zlib1g \

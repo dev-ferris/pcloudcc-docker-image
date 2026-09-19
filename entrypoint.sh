@@ -20,6 +20,12 @@ set -eu
 : "${UID:=1000}"
 : "${GID:=1000}"
 : "${MOUNT_TIMEOUT:=60}"
+# Optional pass-through for upstream options added in 2026 (lneely#396 onwards).
+# All three default to empty, which means "do not pass the flag at all", so the
+# defaults baked into pcloudcc itself stay in force.
+: "${PCLOUD_CACHE_SIZE:=}"
+: "${PCLOUD_LOG_LEVEL:=}"
+: "${PCLOUD_FUSE_OPTS:=}"
 
 PCLOUD_PID=""
 BINDFS_PID=""
@@ -133,6 +139,32 @@ validate_inputs() {
     ''|*[!a-zA-Z0-9._-]*) echo "ERROR: GROUP contains invalid characters, got '${GROUP}'" >&2; exit 1 ;;
   esac
 
+  # pcloudcc itself rejects anything outside 1..1024, but it does so after the
+  # daemon has already been spawned, so catch it here where the error is
+  # attributable to the variable that caused it.
+  case "${PCLOUD_CACHE_SIZE}" in
+    '') ;;
+    *[!0-9]*)
+      echo "ERROR: PCLOUD_CACHE_SIZE must be numeric (GB), got '${PCLOUD_CACHE_SIZE}'" >&2; exit 1 ;;
+    *)
+      if [ "${PCLOUD_CACHE_SIZE}" -lt 1 ] || [ "${PCLOUD_CACHE_SIZE}" -gt 1024 ]; then
+        echo "ERROR: PCLOUD_CACHE_SIZE must be between 1 and 1024 (GB), got '${PCLOUD_CACHE_SIZE}'" >&2; exit 1
+      fi ;;
+  esac
+  case "${PCLOUD_LOG_LEVEL}" in
+    ''|NONE|ERROR|WARNING|INFO|NOTICE|DEBUG) ;;
+    *)
+      echo "ERROR: PCLOUD_LOG_LEVEL must be one of NONE, ERROR, WARNING, INFO, NOTICE, DEBUG; got '${PCLOUD_LOG_LEVEL}'" >&2; exit 1 ;;
+  esac
+  # A single argv element, so there is no shell to inject into — but a stray
+  # space would silently split it into two arguments and pcloudcc would take
+  # the tail as a positional. Keep it to the character set FUSE options use.
+  case "${PCLOUD_FUSE_OPTS}" in
+    '') ;;
+    *[!a-zA-Z0-9_,=./-]*)
+      echo "ERROR: PCLOUD_FUSE_OPTS contains invalid characters, got '${PCLOUD_FUSE_OPTS}'" >&2; exit 1 ;;
+  esac
+
   validate_mount_path PCLOUD_MOUNT "${PCLOUD_MOUNT}"
   if [ "${ENABLE_BINDFS}" = "1" ]; then
     validate_mount_path BINDFS_TARGET "${BINDFS_TARGET}"
@@ -198,10 +230,29 @@ compute_tfa_code() {
 # pcloudcc lifecycle
 # ============================================================================
 
+# Spawns pcloudcc in the background with the mandatory flags plus whatever is
+# passed to this function, and records its PID in PCLOUD_PID.
+#
+# stdin is redirected from /dev/null on purpose. When stdin is not a TTY,
+# pcloudcc reads a single line from it and executes that line as a control
+# command instead of starting up (main.cpp: `has_piped_input`). With
+# `stdin_open: true` but no `tty: true` — a plausible half-way compose config,
+# and what you get by dropping only `tty` after first-time login as the README
+# suggests — stdin is an open pipe that never delivers a line, so the daemon
+# would block there forever. /dev/null yields EOF immediately and makes startup
+# behave identically no matter how the container was configured.
+spawn_pcloudcc() {
+  set -- -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" "$@"
+  [ -z "${PCLOUD_CACHE_SIZE}" ] || set -- "$@" --cache-size "${PCLOUD_CACHE_SIZE}"
+  [ -z "${PCLOUD_LOG_LEVEL}" ]  || set -- "$@" --log-level  "${PCLOUD_LOG_LEVEL}"
+  [ -z "${PCLOUD_FUSE_OPTS}" ]  || set -- "$@" --fuse-opts  "${PCLOUD_FUSE_OPTS}"
+  pcloudcc "$@" < /dev/null &
+  PCLOUD_PID=$!
+}
+
 start_pcloudcc() {
   echo "Starting pCloud command client"
-  pcloudcc -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" &
-  PCLOUD_PID=$!
+  spawn_pcloudcc
 }
 
 # Stop the pcloudcc background process and tear down its FUSE mount.
@@ -308,17 +359,20 @@ first_time_login() {
 
   # pcloudcc reads the account password from PCLOUD_ACCOUNT_PASSWORD when
   # the interactive -p flag is not set. -s saves credentials to data.db.
-  set -- -u "${PCLOUD_USER}" -m "${PCLOUD_MOUNT}" -s
+  # It has to be exported rather than set as a one-shot prefix because
+  # spawn_pcloudcc is a shell function, where a preceding assignment would
+  # leak into the entrypoint's own environment in most POSIX shells anyway.
+  echo "Starting pCloud command client (first-time login mode)"
+  export PCLOUD_ACCOUNT_PASSWORD="${PCLOUD_PASSWORD}"
   if [ -n "${_tfa_code}" ]; then
-    set -- "$@" -t "${_tfa_code}"
+    spawn_pcloudcc -s -t "${_tfa_code}"
+  else
+    spawn_pcloudcc -s
   fi
 
-  echo "Starting pCloud command client (first-time login mode)"
-  PCLOUD_ACCOUNT_PASSWORD="${PCLOUD_PASSWORD}" pcloudcc "$@" &
-  PCLOUD_PID=$!
-
-  # Wipe the password from the environment as soon as pcloudcc has it.
-  unset PCLOUD_PASSWORD _tfa_code
+  # Wipe the password from the environment as soon as pcloudcc has it; the
+  # child already holds its own copy.
+  unset PCLOUD_ACCOUNT_PASSWORD PCLOUD_PASSWORD _tfa_code
 
   # data.db is created early in the login flow — well before the server
   # actually authenticates the account and the FUSE mount becomes usable.
@@ -358,6 +412,48 @@ first_time_login() {
   start_pcloudcc
 }
 
+# Quotes a value for the pcloudcc control prompt. Since upstream swapped
+# Boost.Program_options for CLI11 (lneely#396) the prompt no longer takes the
+# rest of the line as one argument: CLI11::App::parse(std::string) tokenizes it
+# shell-style, so `crypto start my pass phrase` arrives as four tokens and only
+# "my" ever reaches the password option.
+#
+# CLI11 treats "..." as an escaping string (outer quotes stripped, then
+# remove_escaped_characters() applied) and '...'/`...` as literal strings with
+# no escape mechanism at all — so a value containing a single quote cannot be
+# passed inside single quotes. Hence: wrap in double quotes and escape
+# backslash and double quote, which is all remove_escaped_characters()
+# recognises besides \0 and \uXXXX.
+#
+# Single quote and backtick are additionally rewritten to their \uXXXX form.
+# They would survive inside "..." untouched, but CLI11 runs escape_detect()
+# over the whole line *before* tokenizing and rewrites an '=' into a space
+# when the '=' is directly followed by ' " or ` and the nearest preceding
+# -/ "'` character is a '-'. A password such as `my-pass='x` would silently
+# lose its '='. The \uXXXX form keeps those characters out of the raw line;
+# remove_escaped_characters() decodes them back to ASCII.
+prompt_quote() {
+  printf '"%s"' "$(printf '%s' "$1" \
+    | sed -e 's/\\/\\\\/g' \
+          -e 's/"/\\"/g' \
+          -e "s/'/\\\\u0027/g" \
+          -e 's/`/\\u0060/g')"
+}
+
+# True when the crypto folder is currently unlocked. The folder exists in the
+# mount either way, so its presence proves nothing — but pcloudcc's FUSE layer
+# denies access to its contents until `crypto start` has succeeded. Same probe
+# healthcheck.sh uses; LC_ALL=C keeps the message locale-independent.
+crypto_unlocked() {
+  _dir="${PCLOUD_MOUNT}/Crypto Folder"
+  [ -d "${_dir}" ] || return 1
+  _out=$(LC_ALL=C ls -al "${_dir}" 2>&1) || return 1
+  case "${_out}" in
+    *"Permission denied"*) return 1 ;;
+  esac
+  return 0
+}
+
 # A failed unlock (e.g. wrong password) must not abort the entrypoint and take
 # the pcloudcc daemon down with it — log the failure and keep going.
 unlock_crypto() {
@@ -370,16 +466,37 @@ unlock_crypto() {
     return 0
   fi
 
+  # `pcloudcc -k` exits 0 whatever happens: process_commands() throws away the
+  # return value of process_command(), and main() calls exit(0) straight after.
+  # Branching on its exit status therefore reported every unlock as successful
+  # and discarded pcloudcc's actual error message together with the temp file.
+  # Issue the command, ignore the status, and check the resulting state.
   _crypto_log=$(mktemp)
-  if printf 'crypto start %s\n' "${PCLOUD_CRYPT}" \
-       | pcloudcc -u "${PCLOUD_USER}" -k > "${_crypto_log}" 2>&1; then
-    echo "Crypto folder unlock requested."
+  printf 'crypto start %s\n' "$(prompt_quote "${PCLOUD_CRYPT}")" \
+    | pcloudcc -u "${PCLOUD_USER}" -k > "${_crypto_log}" 2>&1 || true
+  unset PCLOUD_CRYPT
+
+  # The RPC is answered once the daemon has processed it, but the folder can
+  # take a moment to become readable, so poll briefly before giving up.
+  _waited=0
+  _unlocked=0
+  while [ "${_waited}" -lt 10 ]; do
+    if crypto_unlocked; then
+      _unlocked=1
+      break
+    fi
+    _waited=$((_waited + 1))
+    sleep 1
+  done
+
+  if [ "${_unlocked}" = "1" ]; then
+    echo "Crypto folder unlocked."
   else
-    echo "WARNING: crypto unlock command failed (wrong password?). pcloudcc keeps running." >&2
+    echo "WARNING: crypto folder is still locked after 'crypto start' (wrong password?). pcloudcc keeps running." >&2
     sed 's/^/  pcloudcc: /' "${_crypto_log}" >&2 || true
   fi
   rm -f "${_crypto_log}"
-  unset _crypto_log PCLOUD_CRYPT
+  unset _crypto_log _waited _unlocked
 }
 
 start_bindfs_overlay() {

@@ -29,6 +29,51 @@ This project is essentially a Docker packaging layer. All the real work happens 
 - POSIX-compliant entrypoint script with graceful shutdown
 - Compatible environment variables with the `DjSni/docker-image-pCloud` setup
 
+## Is a FUSE mount what you actually need?
+
+In September 2026 pCloud opened up [rsync, WebDAV, SFTP and SCP access in
+beta](https://blog.pcloud.com/efficient-nas-backup/), aimed squarely at NAS
+backups. That changes the picture for some of the people who end up here, so
+it is worth being explicit about what this image is and is not.
+
+**This image gives you a mounted filesystem.** `pcloudcc` keeps a FUSE mount
+live for as long as the container runs, so your pCloud storage behaves like a
+local directory: applications can open files in place, Docker containers can
+bind-mount subdirectories, and files arrive without an explicit sync step.
+
+**pCloud's new protocols give you a transfer channel.** They move files on
+demand, on your schedule. For a nightly "push this NAS share to the cloud"
+job that is a much better fit: `rsync` and friends do delta transfers,
+resume, parallelism and integrity checking, none of which a FUSE mount does
+well. Copying a large tree *through* a FUSE mount means every byte crosses
+the kernel/userspace boundary and the client's cache, which is slower and
+more fragile than letting a transfer tool talk to the service directly.
+
+So, roughly:
+
+| What you want to do | Use |
+|---|---|
+| Back up a NAS share to pCloud on a schedule | `rsync`/SFTP/SCP, or [rclone](https://rclone.org/pcloud/) |
+| Bulk-copy or mirror large trees | `rclone` (native pCloud API backend, not WebDAV) |
+| Mount pCloud so apps can read/write files in place | **this image** |
+| Use the Crypto Folder from Linux | **this image** — see below |
+| Attach pCloud to an app that speaks WebDAV | WebDAV directly, no container needed |
+
+Two caveats worth knowing before you migrate anything:
+
+- **The Crypto Folder is not reachable over WebDAV, rsync, SFTP or SCP.**
+  pCloud's client-side encryption is only implemented in their own clients,
+  and `pcloudcc` is the only one of those that runs headless on Linux. If you
+  use Crypto, this image stays the only option — that is not a limitation this
+  packaging can lift.
+- **WebDAV is a paid-plan feature, and rsync/SFTP/SCP are still in beta.** Check
+  pCloud's [help center](https://help.pcloud.com/article/connect-to-pcloud-using-webdav-and-rsync)
+  for the current endpoints and status rather than trusting a hostname copied
+  out of a blog post.
+
+Using both is perfectly reasonable: mount with this image for interactive
+access, and back up with `rclone` or `rsync` against the service directly.
+
 ## Quick start
 
 You have two options: pull the pre-built image from GHCR / Docker Hub (recommended), or build it yourself from this repository.
@@ -207,6 +252,27 @@ From now on, the container will start automatically without manual intervention.
 | `USER` | No | `nobody` | Username that owns the internal mount point |
 | `GROUP` | No | `users` | Group that owns the internal mount point |
 | `MOUNT_TIMEOUT` | No | `60` | Seconds to wait for a mount to become ready (raise to 120+ on slow ARM devices or high-latency links) |
+| `PCLOUD_CACHE_SIZE` | No | — | pcloudcc's local cache limit in GB (its own default is 5). The cache lives in the `pconfig` volume. |
+| `PCLOUD_LOG_LEVEL` | No | — | Verbosity of pcloudcc's own `debug.log`: `NONE`, `ERROR`, `WARNING`, `INFO` (its own default), `NOTICE`, `DEBUG` |
+| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000`, `allow_other`) |
+
+The last three are passed straight through to `pcloudcc` and are omitted entirely
+when unset, so its built-in defaults apply. They need an upstream build from
+2026-05 or newer — with an older `PCLOUDCC_REF` the flags do not exist and the
+daemon will refuse to start.
+
+### Disk usage inside the `pconfig` volume
+
+Two things grow inside `/root/.pcloud`, and neither is covered by the `logging:`
+limits in `docker-compose.yml` — those only cap Docker's capture of the
+container's stdout/stderr:
+
+- **the file cache**, up to 5 GB by default. Lower it with `PCLOUD_CACHE_SIZE`
+  if that volume lives on a small system partition (a common situation on NAS
+  boxes, where `/var/lib/docker` sits on the boot device).
+- **`debug.log`**, written at `INFO` level by default. `PCLOUD_LOG_LEVEL=ERROR`
+  is a reasonable setting for an unattended container; upstream also ships a
+  `logrotate` snippet and rotates on `SIGUSR2`.
 
 ## How it works
 

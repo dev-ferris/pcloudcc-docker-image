@@ -44,6 +44,9 @@ services:
     tty: true
     # pcloudcc logs continuously and this container is meant to run for months.
     # Without a cap the json-file log grows unbounded and fills the host disk.
+    # Note this only caps Docker's capture of stdout/stderr. pcloudcc's own
+    # debug.log and its file cache live in the `pconfig` volume and are bounded
+    # by PCLOUD_LOG_LEVEL / PCLOUD_CACHE_SIZE instead — see README.md.
     logging:
       driver: json-file
       options:
