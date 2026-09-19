@@ -20,20 +20,26 @@ services:
     env_file:
       - .env
     environment:
-      - ENABLE_BINDFS=1
+      # pcloudcc mounts straight onto the path that is bind-mounted to the host.
+      # This used to be ENABLE_BINDFS=1, where pcloudcc mounted at
+      # /pcloud_internal and a bindfs overlay re-exported it at /pcloud with the
+      # ownership rewritten. bindfs is gone; ENABLE_BINDFS=1 still starts (it is
+      # translated to exactly the line below) but warns, so prefer this form.
+      - PCLOUD_MOUNT=/pcloud
     read_only: true
     tmpfs:
       - /tmp
       - /run
-      - /pcloud_internal
     security_opt:
       - apparmor:unconfined
       - no-new-privileges:true
     devices:
       - /dev/fuse
     # Drop all default capabilities and add back only what is actually needed.
-    # SYS_ADMIN: required for FUSE mount/umount by pcloudcc and bindfs.
+    # SYS_ADMIN: required for FUSE mount/umount by pcloudcc.
     # CHOWN:     required by entrypoint.sh to chown the mount point to USER:GROUP.
+    #            Note this now lands on the host directory bind-mounted above,
+    #            while it is still empty and before pcloudcc mounts over it.
     cap_drop:
       - ALL
     cap_add:

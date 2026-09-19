@@ -219,7 +219,6 @@ jobs:
             test -x /usr/local/bin/pcloudcc
             test -x /entrypoint.sh
             test -x /healthcheck.sh
-            test -x /usr/bin/bindfs
             # Both scripts run under /bin/sh in this image; a syntax error would
             # otherwise only surface at container start.
             sh -n /entrypoint.sh
@@ -231,8 +230,21 @@ jobs:
             # from stale mounts left on a users host.
             command -v fusermount3 || command -v fusermount || {
               echo "ERROR: no fusermount binary in the runtime image"; exit 1; }
+            # mountpoint comes from util-linux, which is Essential in Debian and
+            # therefore no longer installed explicitly. Assert it is really there
+            # so a de-essentialization in a future base image fails here rather
+            # than at container start.
             command -v mountpoint
             command -v oathtool
+            # bindfs was removed; entrypoint.sh must not start depending on it
+            # again by accident.
+            if [ -e /usr/bin/bindfs ]; then
+              echo "ERROR: bindfs is back in the runtime image"; exit 1; fi
+            # ca-certificates (and with it openssl/libssl3) was dropped in favour
+            # of copying just the generated bundle out of the builder stage.
+            test -s /etc/ssl/certs/ca-certificates.crt
+            if command -v openssl >/dev/null 2>&1; then
+              echo "ERROR: openssl is back in the runtime image"; exit 1; fi
             # No data.db in a fresh container: the healthcheck must report the
             # bootstrap state as healthy so Docker does not kill the container
             # before first-time login can finish.

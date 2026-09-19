@@ -28,7 +28,6 @@ set -eu
 : "${PCLOUD_FUSE_OPTS:=}"
 
 PCLOUD_PID=""
-BINDFS_PID=""
 
 # ============================================================================
 # Filesystem / process helpers
@@ -166,11 +165,11 @@ validate_inputs() {
   esac
 
   validate_mount_path PCLOUD_MOUNT "${PCLOUD_MOUNT}"
+  # Checked before apply_bindfs_compat() promotes it to PCLOUD_MOUNT. The two
+  # are no longer required to differ: with bindfs gone there is no second layer
+  # to stack on top, so BINDFS_TARGET *becomes* the pcloudcc mount point.
   if [ "${ENABLE_BINDFS}" = "1" ]; then
     validate_mount_path BINDFS_TARGET "${BINDFS_TARGET}"
-    if [ "${BINDFS_TARGET}" = "${PCLOUD_MOUNT}" ]; then
-      echo "ERROR: BINDFS_TARGET must differ from PCLOUD_MOUNT" >&2; exit 1
-    fi
   fi
 }
 
@@ -293,17 +292,9 @@ cleanup() {
   trap - TERM INT EXIT
   echo "Shutting down..."
 
-  # Unmount before signalling: a clean unmount makes bindfs exit by itself and
-  # leaves no stale mount point behind. Killing it first would tear the process
-  # down while the kernel still has the FUSE mount attached.
-  if [ "${ENABLE_BINDFS}" = "1" ]; then
-    fuse_unmount "${BINDFS_TARGET}"
-  fi
-  if [ -n "${BINDFS_PID}" ] && kill -0 "${BINDFS_PID}" 2>/dev/null; then
-    kill -TERM "${BINDFS_PID}" 2>/dev/null || true
-    wait_for_exit "${BINDFS_PID}" 5 || kill -KILL "${BINDFS_PID}" 2>/dev/null || true
-  fi
-
+  # There is exactly one FUSE mount left to tear down (PCLOUD_MOUNT, wherever
+  # apply_bindfs_compat() pointed it), and stop_pcloudcc() owns it.
+  #
   # Graceful pcloudcc shutdown - give it time to finish pending transfers
   if [ -n "${PCLOUD_PID}" ] && kill -0 "${PCLOUD_PID}" 2>/dev/null; then
     echo "Stopping pcloudcc gracefully..."
@@ -315,8 +306,32 @@ cleanup() {
 # Phases
 # ============================================================================
 
-# With read_only: true the container FS is immutable; /pcloud_internal must be
-# listed under tmpfs (or pre-created in the image) so mkdir/chown can succeed.
+# bindfs is no longer installed (see the Dockerfile for why). ENABLE_BINDFS,
+# BINDFS_TARGET, UID and GID are still read and validated so existing .env
+# files and compose overrides start rather than abort.
+#
+# ENABLE_BINDFS=1 used to mean: pcloudcc mounts at PCLOUD_MOUNT, and bindfs
+# re-exports that at BINDFS_TARGET with ownership rewritten to UID:GID. Of
+# those two halves, the path is the one deployments actually depend on —
+# BINDFS_TARGET is what docker-compose.yml bind-mounts to the host — so it is
+# preserved by moving the pcloudcc mount there directly. The ownership rewrite
+# is gone with the overlay that performed it; PCLOUD_FUSE_OPTS is the remaining
+# lever, and the warning below points at it rather than failing silently.
+apply_bindfs_compat() {
+  [ "${ENABLE_BINDFS}" = "1" ] || return 0
+
+  echo "WARNING: ENABLE_BINDFS=1 is deprecated - bindfs is no longer part of this image." >&2
+  echo "         Mounting pcloudcc directly at BINDFS_TARGET ('${BINDFS_TARGET}') instead," >&2
+  echo "         so the path stays where your volume mapping expects it." >&2
+  echo "         UID=${UID}/GID=${GID} are no longer applied. If you need that remapping," >&2
+  echo "         try PCLOUD_FUSE_OPTS=uid=${UID},gid=${GID} and verify the mount comes up." >&2
+
+  PCLOUD_MOUNT="${BINDFS_TARGET}"
+}
+
+# With read_only: true the container FS is immutable; the mount point must be
+# listed under tmpfs, bind-mounted from the host, or pre-created in the image
+# so mkdir/chown can succeed.
 prepare_mount_point() {
   if ! mkdir -p "${PCLOUD_MOUNT}" 2>/dev/null; then
     echo "ERROR: Cannot create mount point '${PCLOUD_MOUNT}'." >&2
@@ -499,21 +514,12 @@ unlock_crypto() {
   unset _crypto_log _waited _unlocked
 }
 
-start_bindfs_overlay() {
-  [ "${ENABLE_BINDFS}" = "1" ] || return 0
-  (
-    wait_for_mount "${PCLOUD_MOUNT}" "bindfs"
-    echo "[bindfs] Mounting ${PCLOUD_MOUNT} -> ${BINDFS_TARGET} (uid=${UID}, gid=${GID})"
-    exec bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
-  ) &
-  BINDFS_PID=$!
-}
-
 # ============================================================================
 # Main
 # ============================================================================
 
 validate_inputs
+apply_bindfs_compat
 load_secrets
 prepare_mount_point
 log_provided_secrets
@@ -533,7 +539,5 @@ unlock_crypto
 
 # Clear remaining secrets from the environment after startup.
 unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
-
-start_bindfs_overlay
 
 wait "${PCLOUD_PID}"

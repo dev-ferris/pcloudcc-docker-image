@@ -18,8 +18,10 @@ set -u
 # the user can finish setup.
 [ -f /root/.pcloud/data.db ] || exit 0
 
-# Determine the user-facing mount: bindfs overlay if enabled, otherwise
-# the raw pcloudcc mount.
+# Determine the user-facing mount. bindfs is no longer part of the image, but
+# ENABLE_BINDFS=1 is still honoured for compatibility: apply_bindfs_compat() in
+# entrypoint.sh then points pcloudcc's own mount at BINDFS_TARGET, so the probe
+# target is unchanged from when an overlay was actually mounted there.
 if [ "${ENABLE_BINDFS}" = "1" ]; then
   mnt="${BINDFS_TARGET}"
 else
