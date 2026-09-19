@@ -12,7 +12,7 @@ set -eu
 : "${PCLOUD_TOTP_SECRET_FILE:=}"
 : "${PCLOUD_CRYPT:=}"
 : "${PCLOUD_CRYPT_FILE:=}"
-: "${PCLOUD_MOUNT:=/pcloud}"
+: "${PCLOUD_MOUNT:=/pcloud_internal}"
 : "${USER:=nobody}"
 : "${GROUP:=users}"
 : "${ENABLE_BINDFS:=0}"
