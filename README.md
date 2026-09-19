@@ -141,6 +141,35 @@ cosign verify \
   ghcr.io/dev-ferris/pcloudcc-docker-image:latest
 ```
 
+### Image tags
+
+Images built from the default branch or a `v*` tag are **release** images.
+Anything built from another branch is a **development** image and is kept in a
+separate `dev-` namespace, so it can never take a tag a release build would
+also publish:
+
+| Tag | Channel | Produced by |
+|---|---|---|
+| `latest` | release | every push to the default branch |
+| `main` | release | every push to the default branch |
+| `1.2.3`, `1.2` | release | a pushed `v*` git tag |
+| `YYYY-MM-DD` | release | any non-PR release build that day |
+| `nightly` | release | the weekly scheduled rebuild |
+| `dev-<branch>` | dev | a manual run of the build workflow on that branch |
+| `dev-<sha>` | dev | same, pinned to one commit |
+
+The channel is also recorded in the image itself, so it survives being pulled
+and re-tagged:
+
+```bash
+docker image inspect --format '{{index .Config.Labels "pcloudcc.build.channel"}}' \
+  ghcr.io/dev-ferris/pcloudcc-docker-image:latest
+```
+
+Development images pass the same Trivy gate, smoke test and signing as release
+images, but they are built from unreviewed branches — don't run them in
+production.
+
 ### Option B: Build from source
 
 #### 1. Clone the repository
@@ -341,6 +370,11 @@ Every published image is:
 - Scanned with Trivy — CRITICAL/HIGH CVEs with an available fix block the build; the full scan results (all severities, including findings without an available fix) are uploaded to the GitHub Security tab
 - Signed with cosign keyless signing (verifiable via `cosign verify`)
 - Shipped with an SBOM and provenance attestation
+
+Release and development images are separated by tag namespace and carry a
+`pcloudcc.build.channel` label — see [Image tags](#image-tags). Only release
+builds write to the shared registry build cache, so a branch build cannot push
+its layers into the cache that default-branch builds restore from.
 
 The exact upstream commit compiled into an image is recorded inside it:
 

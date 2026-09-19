@@ -101,6 +101,28 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Everything published from a ref other than the default branch (or a
+      # v* tag) is a development image. Two things have to follow from that:
+      # it must never take a tag a release build could also take, and it has
+      # to say so in its own metadata — up to now the only hint was
+      # org.opencontainers.image.version happening to hold a branch name.
+      - name: Classify build channel
+        id: channel
+        env:
+          REF: ${{ github.ref }}
+          # Absent from some event payloads, so fall back rather than
+          # misclassifying a scheduled release build as a dev build.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          default_branch="${DEFAULT_BRANCH:-main}"
+          case "${REF}" in
+            "refs/heads/${default_branch}"|refs/tags/v*) channel=release ;;
+            *)                                          channel=dev ;;
+          esac
+          echo "name=${channel}" >> "$GITHUB_OUTPUT"
+          echo "release=$([ "${channel}" = release ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "Build channel: ${channel} (ref=${REF}, default branch=${default_branch})"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -111,14 +133,26 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             ${{ steps.dockerhub_check.outputs.enabled == 'true' && format('docker.io/{0}', steps.dockerhub_check.outputs.image) || '' }}
+          # Release and dev tags are kept in disjoint namespaces. Dev builds
+          # get a `dev-` prefix on the branch tag, an immutable `dev-<sha>`,
+          # and crucially NOT the dated tag: that one is unprefixed and shared,
+          # so a branch build used to quietly overwrite the dated tag that a
+          # main build had published the same day.
           tags: |
-            type=ref,event=branch
+            type=ref,event=branch,enable=${{ steps.channel.outputs.release == 'true' }}
+            type=ref,event=branch,prefix=dev-,enable=${{ steps.channel.outputs.release != 'true' }}
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=schedule,pattern=nightly
-            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' }}
+            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' && steps.channel.outputs.release == 'true' }}
+            type=sha,prefix=dev-,enable=${{ github.event_name != 'pull_request' && steps.channel.outputs.release != 'true' }}
+          # Makes the channel readable from the image itself (docker inspect),
+          # not just inferable from the tag someone happened to pull it by.
+          labels: |
+            org.opencontainers.image.ref.name=${{ github.ref_name }}
+            pcloudcc.build.channel=${{ steps.channel.outputs.name }}
 
       # Build linux/amd64 locally so Trivy can gate on it before anything is
       # published. Multi-platform builds can't be loaded into the local daemon,
@@ -248,7 +282,11 @@ jobs:
           # as above; the freshly built amd64 layers still come from the local
           # BuildKit cache, only arm64/arm-v7 are rebuilt from scratch.
           cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache', env.REGISTRY, env.IMAGE_NAME) || '' }}
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+          # Only release builds write the shared cache. A dev build still reads
+          # it for a warm start, but must not write to it: the cache is keyed on
+          # layer content, so a branch that changes the Dockerfile would have
+          # pushed its layers into the cache that main builds restore from.
+          cache-to: ${{ steps.channel.outputs.release == 'true' && format('type=registry,ref={0}/{1}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true', env.REGISTRY, env.IMAGE_NAME) || '' }}
 
       - name: Install Cosign
         if: github.event_name != 'pull_request'
