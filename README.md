@@ -103,7 +103,7 @@ services:
       - .env
     environment:
       - PCLOUD_MOUNT=/pcloud
-      - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other
+      - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other,default_permissions
     read_only: true
     tmpfs:
       - /tmp
@@ -276,14 +276,14 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_MOUNT` | No | `/pcloud_internal` | Where pcloudcc mounts the pCloud filesystem (set to `/pcloud` in the compose file) |
 | `USER` | No | `nobody` | Username that owns the mount point |
 | `GROUP` | No | `users` | Group that owns the mount point |
-| `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` mounts at `BINDFS_TARGET` and fills `PCLOUD_FUSE_OPTS` with `uid=$UID,gid=$GID,allow_other` |
+| `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` mounts at `BINDFS_TARGET` and fills `PCLOUD_FUSE_OPTS` with `uid=$UID,gid=$GID,allow_other,default_permissions` |
 | `BINDFS_TARGET` | No | `/pcloud` | **Deprecated.** Becomes `PCLOUD_MOUNT` when `ENABLE_BINDFS=1` |
 | `UID` | No | `1000` | **Deprecated.** Applied as the FUSE `uid=` option when `ENABLE_BINDFS=1` |
 | `GID` | No | `1000` | **Deprecated.** Applied as the FUSE `gid=` option when `ENABLE_BINDFS=1` |
 | `MOUNT_TIMEOUT` | No | `60` | Seconds to wait for a mount to become ready (raise to 120+ on slow ARM devices or high-latency links) |
 | `PCLOUD_CACHE_SIZE` | No | — | pcloudcc's local cache limit in GB (its own default is 5). The cache lives in the `pconfig` volume. |
 | `PCLOUD_LOG_LEVEL` | No | — | Verbosity of pcloudcc's own `debug.log`: `NONE`, `ERROR`, `WARNING`, `INFO` (its own default), `NOTICE`, `DEBUG` |
-| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000,allow_other`). Options set here are never overwritten by `ENABLE_BINDFS=1` |
+| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000,allow_other,default_permissions`). Options set here are never overwritten by `ENABLE_BINDFS=1`. Always pair `allow_other` with `default_permissions` — see [Security considerations](#security-considerations) |
 
 The last three are passed straight through to `pcloudcc` and are omitted entirely
 when unset, so its built-in defaults apply. They need an upstream build from
@@ -330,13 +330,15 @@ halves of the old behaviour are reproduced on pcloudcc's own mount, so
 | | Before | Now |
 |---|---|---|
 | Path | pcloudcc at `/pcloud_internal`, bindfs re-exports at `BINDFS_TARGET` | pcloudcc mounts at `BINDFS_TARGET` directly |
-| Ownership | `bindfs -u $UID -g $GID` rewrites it | `--fuse-opts uid=$UID,gid=$GID,allow_other` makes pcloudcc report it |
+| Ownership | `bindfs -u $UID -g $GID` rewrites it | `--fuse-opts uid=$UID,gid=$GID` makes pcloudcc report it |
+| Access control | bindfs adds `allow_other` + `default_permissions` | the same two options, added alongside |
 | Processes | `pcloudcc` + `bindfs` | `pcloudcc` |
 
 `allow_other` is part of the set rather than an extra: the mount is created by
 root, and without it the kernel denies access to every other uid — including
 the one the files are now reported as belonging to, which would make the
-remapping pointless.
+remapping pointless. `default_permissions` is equally non-optional, and for a
+less obvious reason — see [Security considerations](#security-considerations).
 
 Options you set in `PCLOUD_FUSE_OPTS` yourself are never overwritten, matched
 per option key. That is also the escape hatch if your kernel/libfuse rejects
@@ -355,7 +357,15 @@ To limit the blast radius:
 - `no-new-privileges:true` prevents privilege escalation via setuid/setgid binaries.
 - `read_only: true` makes the root filesystem read-only; only the named volume and tmpfs mounts are writable.
 - All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) and `CHOWN` (mount-point ownership) are re-added.
-- `allow_other` — set explicitly via `PCLOUD_FUSE_OPTS`, or implicitly by `ENABLE_BINDFS=1` — makes the mount readable by every uid in the container, not just the one that created it. That is what lets the remapped `UID`/`GID` reach the files at all, but it is a widening: leave it off if nothing but `root` needs the mount.
+- `allow_other` — set explicitly via `PCLOUD_FUSE_OPTS`, or implicitly by `ENABLE_BINDFS=1` — makes the mount reachable by every uid, not just the one that created it. That is what lets the remapped `UID`/`GID` reach the files at all, but it is a widening: leave it off if nothing but `root` needs the mount.
+
+### Why `allow_other` must be paired with `default_permissions`
+
+FUSE does not enforce the mode bits a filesystem reports unless the mount carries `default_permissions`; without it, access control is the filesystem's own job. `pcloudcc` does not do that job — upstream's `psync_oper` binds 29 handlers and `access` is not one of them, and the `PSYNC_PERM_MODIFY` checks in `pfs_open` are pCloud's per-path *account* permissions, which are identical no matter which local uid is calling.
+
+So `allow_other` on its own means every uid that can reach the mount has full read/write over the entire pCloud account — including the decrypted `Crypto Folder` after unlock — regardless of the `1000:1000` / `0644` ownership `ls` displays. Since the mount is normally the `rshared` bind mount, "every uid that can reach it" means every local account on the host, including service accounts.
+
+`bindfs` never had this gap: it added `-odefault_permissions` unconditionally next to its own `-oallow_other`. `ENABLE_BINDFS=1` and the shipped compose file therefore set both, and the entrypoint prints a warning if it finds `allow_other` in a hand-written `PCLOUD_FUSE_OPTS` without it.
 - The runtime layer carries no `ca-certificates` package and therefore no `openssl`/`libssl3`. pcloudcc validates pCloud's TLS certificates against fingerprints compiled into the binary, and nothing else in the image opens an outbound TLS connection; the generated CA bundle is still copied in from the build stage as a plain file at `/etc/ssl/certs/ca-certificates.crt`.
 
 A custom AppArmor profile that restricts the allowed syscalls to exactly those needed by FUSE would further reduce the attack surface but is not included here, as profiles are host-specific.

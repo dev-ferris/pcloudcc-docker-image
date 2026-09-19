@@ -342,6 +342,11 @@ fuse_opt_append() {
 #                other uid access to the mount - including the UID the files
 #                are now reported as belonging to, which would make the
 #                remapping useless.
+#   enforcement - default_permissions comes with allow_other, for the reason
+#                spelled out at warn_unenforced_mount() below. bindfs added it
+#                unconditionally next to its own allow_other, so leaving it out
+#                here would have silently dropped access control that the
+#                overlay did perform.
 #
 # An explicitly set PCLOUD_FUSE_OPTS wins per option key: it is the more
 # specific instruction, and leaving it intact is also the escape hatch if a
@@ -351,14 +356,43 @@ apply_bindfs_compat() {
 
   PCLOUD_MOUNT="${BINDFS_TARGET}"
 
-  fuse_opt_present uid         || fuse_opt_append "uid=${UID}"
-  fuse_opt_present gid         || fuse_opt_append "gid=${GID}"
-  fuse_opt_present allow_other || fuse_opt_append "allow_other"
+  fuse_opt_present uid                 || fuse_opt_append "uid=${UID}"
+  fuse_opt_present gid                 || fuse_opt_append "gid=${GID}"
+  fuse_opt_present allow_other         || fuse_opt_append "allow_other"
+  fuse_opt_present default_permissions || fuse_opt_append "default_permissions"
 
   echo "NOTICE: ENABLE_BINDFS=1 is deprecated - bindfs is no longer part of this image." >&2
   echo "        Mounting pcloudcc at BINDFS_TARGET ('${BINDFS_TARGET}') with" >&2
   echo "        --fuse-opts '${PCLOUD_FUSE_OPTS}' instead of layering an overlay on top." >&2
   echo "        Set PCLOUD_MOUNT and PCLOUD_FUSE_OPTS directly to silence this." >&2
+}
+
+# allow_other lets every uid reach the mount. default_permissions is what makes
+# the kernel then enforce the ownership and mode bits the filesystem reports
+# against that uid -- without it FUSE delegates access control to the
+# filesystem, and pcloudcc implements none: psync_oper (upstream pclsync/pfs.c)
+# binds 29 handlers and `access` is not among them, and the PSYNC_PERM_MODIFY
+# checks in pfs_open are pCloud's per-path account permissions, identical for
+# every local caller. allow_other without default_permissions therefore hands
+# any uid that can reach the mount full read/write over the whole pCloud
+# account, whatever ownership `ls` shows -- and because PCLOUD_MOUNT is
+# normally the rshared bind mount, "any uid" means any local account on the
+# host. Upstream's own doc/USAGE.md example pairs the two for this reason.
+#
+# apply_bindfs_compat() sets both. This catches the other route in: a
+# PCLOUD_FUSE_OPTS written by hand.
+warn_unenforced_mount() {
+  fuse_opt_present allow_other || return 0
+  if fuse_opt_present default_permissions; then
+    return 0
+  fi
+
+  echo "WARNING: PCLOUD_FUSE_OPTS enables 'allow_other' without 'default_permissions'." >&2
+  echo "         pcloudcc performs no access checks of its own, so the kernel will not" >&2
+  echo "         enforce the ownership it reports: every uid that can reach" >&2
+  echo "         '${PCLOUD_MOUNT}' gets full read/write access to your pCloud account," >&2
+  echo "         including the Crypto Folder once it is unlocked. Add" >&2
+  echo "         'default_permissions' unless that is what you want." >&2
 }
 
 # With read_only: true the container FS is immutable; the mount point must be
@@ -552,6 +586,7 @@ unlock_crypto() {
 
 validate_inputs
 apply_bindfs_compat
+warn_unenforced_mount
 load_secrets
 prepare_mount_point
 log_provided_secrets

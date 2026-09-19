@@ -29,9 +29,12 @@ services:
       #
       # allow_other is required for uid=/gid= to be of any use: the mount is
       # created by root, and the kernel would otherwise deny access to every
-      # other uid. Drop both lines if only root needs to read the mount.
+      # other uid. default_permissions must accompany it -- pcloudcc performs
+      # no access checks of its own, so without it the kernel enforces nothing
+      # and every local uid gets full read/write on the account. Drop both
+      # lines if only root needs to read the mount.
       - PCLOUD_MOUNT=/pcloud
-      - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other
+      - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other,default_permissions
     read_only: true
     tmpfs:
       - /tmp
