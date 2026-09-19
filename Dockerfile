@@ -76,10 +76,11 @@ LABEL org.opencontainers.image.title="pcloudcc" \
 #                 asserts `mountpoint` exists, so a future de-essentialization
 #                 would fail CI rather than the container.
 #
-# Both candidate mount points are pre-created: /pcloud_internal is the
-# PCLOUD_MOUNT default, /pcloud is what docker-compose.yml sets it to and what
-# ENABLE_BINDFS=1 resolves to. With `read_only: true` neither could be created
-# at runtime unless it is bind-mounted or a tmpfs.
+# /pcloud is pre-created: it is the PCLOUD_MOUNT default, what
+# docker-compose.yml bind-mounts, and what ENABLE_BINDFS=1 resolves to. With
+# `read_only: true` it could not be created at runtime unless it is
+# bind-mounted or a tmpfs. (/pcloud_internal is gone: it only existed as the
+# private lower layer under the bindfs overlay.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fuse3 \
     libfuse3-4 \
@@ -91,7 +92,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     oathtool \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /pcloud_internal /pcloud
+    && mkdir -p /pcloud
 
 # The CA bundle without the package that generates it. The builder stage needs
 # ca-certificates anyway (git fetches over HTTPS), so take the generated bundle
@@ -119,7 +120,7 @@ COPY --chmod=755 healthcheck.sh /healthcheck.sh
 # They are kept, and keep their old meaning: apply_bindfs_compat() in
 # entrypoint.sh translates them into the mount point and the uid=/gid=/
 # allow_other FUSE options of pcloudcc's own mount.
-ENV PCLOUD_MOUNT="/pcloud_internal" \
+ENV PCLOUD_MOUNT="/pcloud" \
     ENABLE_BINDFS="0" \
     BINDFS_TARGET="/pcloud" \
     UID="1000" \

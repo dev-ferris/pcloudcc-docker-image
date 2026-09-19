@@ -6,7 +6,7 @@
 #   1 = unhealthy
 set -u
 
-: "${PCLOUD_MOUNT:=/pcloud_internal}"
+: "${PCLOUD_MOUNT:=/pcloud}"
 : "${ENABLE_BINDFS:=0}"
 : "${BINDFS_TARGET:=/pcloud}"
 : "${PCLOUD_CRYPT:=}"

@@ -127,7 +127,7 @@ services:
         max-file: "3"
 ```
 
-> **Note:** with `read_only: true` the entrypoint can only create and chown `PCLOUD_MOUNT` if that path is writable — either bind-mounted from the host as above, or listed under `tmpfs`. If you leave `PCLOUD_MOUNT` at its default `/pcloud_internal`, add `/pcloud_internal` to the `tmpfs` list.
+> **Note:** with `read_only: true` the entrypoint can only create and chown `PCLOUD_MOUNT` if that path is writable — either bind-mounted from the host as above, or listed under `tmpfs`. If you point `PCLOUD_MOUNT` somewhere that is neither, startup fails with an explicit error.
 > Once first-time login is complete, remove `stdin_open` and `tty` to reduce the interactive attack surface.
 
 Then jump straight to [step 2](#2-create-your-env-file).
@@ -273,7 +273,7 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_2FA` | No | — | Single-use 2FA code (alternative to `PCLOUD_TOTP_SECRET` — codes expire after ~30s) |
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
 | `PCLOUD_CRYPT_FILE` | No | — | Path to a file with the crypto password (e.g. `/run/secrets/pcloud_crypt`); takes precedence over `PCLOUD_CRYPT` |
-| `PCLOUD_MOUNT` | No | `/pcloud_internal` | Where pcloudcc mounts the pCloud filesystem (set to `/pcloud` in the compose file) |
+| `PCLOUD_MOUNT` | No | `/pcloud` | Where pcloudcc mounts the pCloud filesystem. Must match the host bind mount in `docker-compose.yml` |
 | `USER` | No | `nobody` | Username that owns the mount point |
 | `GROUP` | No | `users` | Group that owns the mount point |
 | `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` mounts at `BINDFS_TARGET` and fills `PCLOUD_FUSE_OPTS` with `uid=$UID,gid=$GID,allow_other,default_permissions` |

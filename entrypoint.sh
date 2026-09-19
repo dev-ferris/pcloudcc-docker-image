@@ -395,6 +395,29 @@ warn_unenforced_mount() {
   echo "         'default_permissions' unless that is what you want." >&2
 }
 
+# /pcloud_internal was the PCLOUD_MOUNT default for as long as bindfs re-exported
+# it at /pcloud. With the overlay gone there is only one mount left and the
+# default is /pcloud itself, so the old path has no role.
+#
+# One migration goes wrong quietly: a setup that ran ENABLE_BINDFS=0 and
+# bind-mounted the host at /pcloud_internal (which an earlier README told people
+# to do) still has that bind mount, but the pCloud filesystem now lands at
+# /pcloud instead. Nothing errors - the host directory simply stays empty, which
+# reads like a broken sync rather than a moved mount point. Say so instead.
+warn_legacy_mount_point() {
+  _legacy="/pcloud_internal"
+  if [ "${PCLOUD_MOUNT}" = "${_legacy}" ]; then
+    return 0
+  fi
+  mountpoint -q "${_legacy}" 2>/dev/null || return 0
+
+  echo "WARNING: something is still mounted at '${_legacy}', but pcloudcc now mounts" >&2
+  echo "         at '${PCLOUD_MOUNT}'. '${_legacy}' was the default only while the bindfs" >&2
+  echo "         overlay existed and is no longer used for anything." >&2
+  echo "         If that is your host bind mount, either repoint it at '${PCLOUD_MOUNT}'" >&2
+  echo "         or set PCLOUD_MOUNT=${_legacy}; otherwise drop it from docker-compose.yml." >&2
+}
+
 # With read_only: true the container FS is immutable; the mount point must be
 # listed under tmpfs, bind-mounted from the host, or pre-created in the image
 # so mkdir/chown can succeed.
@@ -587,6 +610,7 @@ unlock_crypto() {
 validate_inputs
 apply_bindfs_compat
 warn_unenforced_mount
+warn_legacy_mount_point
 load_secrets
 prepare_mount_point
 log_provided_secrets

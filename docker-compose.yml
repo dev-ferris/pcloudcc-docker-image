@@ -20,19 +20,19 @@ services:
     env_file:
       - .env
     environment:
-      # pcloudcc mounts straight onto the path that is bind-mounted to the host,
-      # and reports files as owned by uid/gid 1000 so they are usable from the
-      # host. This used to be ENABLE_BINDFS=1, where pcloudcc mounted at
-      # /pcloud_internal and a bindfs overlay re-exported it at /pcloud with the
-      # ownership rewritten. bindfs is gone; ENABLE_BINDFS=1 still works and is
-      # translated to exactly the two lines below, but prefer this form.
+      # PCLOUD_MOUNT is also the image default; it is spelled out because it
+      # has to match the bind mount above, and the two should be edited
+      # together. This replaces the old ENABLE_BINDFS=1, where pcloudcc mounted
+      # at a private /pcloud_internal and a bindfs overlay re-exported it here
+      # with the ownership rewritten. ENABLE_BINDFS=1 still works and is
+      # translated into exactly these two lines, but prefer this form.
       #
       # allow_other is required for uid=/gid= to be of any use: the mount is
       # created by root, and the kernel would otherwise deny access to every
       # other uid. default_permissions must accompany it -- pcloudcc performs
       # no access checks of its own, so without it the kernel enforces nothing
-      # and every local uid gets full read/write on the account. Drop both
-      # lines if only root needs to read the mount.
+      # and every local uid gets full read/write on the account. Drop the
+      # PCLOUD_FUSE_OPTS line if only root needs to read the mount.
       - PCLOUD_MOUNT=/pcloud
       - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other,default_permissions
     read_only: true
