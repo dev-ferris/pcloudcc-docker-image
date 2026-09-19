@@ -116,8 +116,9 @@ COPY --chmod=755 healthcheck.sh /healthcheck.sh
 # full list.
 #
 # ENABLE_BINDFS, BINDFS_TARGET, UID and GID no longer drive a bindfs overlay.
-# They are kept so existing .env files and compose overrides keep working; see
-# the compatibility shim in entrypoint.sh for what ENABLE_BINDFS=1 does now.
+# They are kept, and keep their old meaning: apply_bindfs_compat() in
+# entrypoint.sh translates them into the mount point and the uid=/gid=/
+# allow_other FUSE options of pcloudcc's own mount.
 ENV PCLOUD_MOUNT="/pcloud_internal" \
     ENABLE_BINDFS="0" \
     BINDFS_TARGET="/pcloud" \

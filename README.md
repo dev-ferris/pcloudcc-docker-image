@@ -103,6 +103,7 @@ services:
       - .env
     environment:
       - PCLOUD_MOUNT=/pcloud
+      - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other
     read_only: true
     tmpfs:
       - /tmp
@@ -275,14 +276,14 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_MOUNT` | No | `/pcloud_internal` | Where pcloudcc mounts the pCloud filesystem (set to `/pcloud` in the compose file) |
 | `USER` | No | `nobody` | Username that owns the mount point |
 | `GROUP` | No | `users` | Group that owns the mount point |
-| `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` makes pcloudcc mount at `BINDFS_TARGET` instead of `PCLOUD_MOUNT` and logs a warning |
-| `BINDFS_TARGET` | No | `/pcloud` | **Deprecated.** Only read when `ENABLE_BINDFS=1` |
-| `UID` | No | `1000` | **Deprecated.** Validated but no longer applied |
-| `GID` | No | `1000` | **Deprecated.** Validated but no longer applied |
+| `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` mounts at `BINDFS_TARGET` and fills `PCLOUD_FUSE_OPTS` with `uid=$UID,gid=$GID,allow_other` |
+| `BINDFS_TARGET` | No | `/pcloud` | **Deprecated.** Becomes `PCLOUD_MOUNT` when `ENABLE_BINDFS=1` |
+| `UID` | No | `1000` | **Deprecated.** Applied as the FUSE `uid=` option when `ENABLE_BINDFS=1` |
+| `GID` | No | `1000` | **Deprecated.** Applied as the FUSE `gid=` option when `ENABLE_BINDFS=1` |
 | `MOUNT_TIMEOUT` | No | `60` | Seconds to wait for a mount to become ready (raise to 120+ on slow ARM devices or high-latency links) |
 | `PCLOUD_CACHE_SIZE` | No | — | pcloudcc's local cache limit in GB (its own default is 5). The cache lives in the `pconfig` volume. |
 | `PCLOUD_LOG_LEVEL` | No | — | Verbosity of pcloudcc's own `debug.log`: `NONE`, `ERROR`, `WARNING`, `INFO` (its own default), `NOTICE`, `DEBUG` |
-| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000`, `allow_other`) |
+| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000,allow_other`). Options set here are never overwritten by `ENABLE_BINDFS=1` |
 
 The last three are passed straight through to `pcloudcc` and are omitted entirely
 when unset, so its built-in defaults apply. They need an upstream build from
@@ -322,19 +323,26 @@ what is really a mount-option concern, and `bindfs` is packaged only in
 Debian/Ubuntu — Alpine carries it in `edge/testing` only — which tied the image
 to a Debian base and kept its CVE feed attached to the scan results.
 
-Existing configurations keep working. `ENABLE_BINDFS=1` is still accepted and
-now simply makes pcloudcc mount directly at `BINDFS_TARGET`, so the path your
-volume mapping already points at is unchanged; the entrypoint logs a warning
-pointing here. What is **not** preserved is the UID/GID rewrite — there is no
-second layer left to perform it. If you relied on it:
+Existing configurations keep working, including the UID/GID remapping. Both
+halves of the old behaviour are reproduced on pcloudcc's own mount, so
+`ENABLE_BINDFS=1` needs no change on your side:
 
-- On most setups the ownership reported inside a FUSE mount can be set at mount
-  time instead: `PCLOUD_FUSE_OPTS=uid=1000,gid=1000`. Whether libfuse and your
-  kernel accept it varies, so check that the mount still comes up before
-  relying on it.
-- Otherwise, files appear owned by `root` (the user pcloudcc runs as), which is
-  usually only a problem when the host reads them directly rather than through
-  a container.
+| | Before | Now |
+|---|---|---|
+| Path | pcloudcc at `/pcloud_internal`, bindfs re-exports at `BINDFS_TARGET` | pcloudcc mounts at `BINDFS_TARGET` directly |
+| Ownership | `bindfs -u $UID -g $GID` rewrites it | `--fuse-opts uid=$UID,gid=$GID,allow_other` makes pcloudcc report it |
+| Processes | `pcloudcc` + `bindfs` | `pcloudcc` |
+
+`allow_other` is part of the set rather than an extra: the mount is created by
+root, and without it the kernel denies access to every other uid — including
+the one the files are now reported as belonging to, which would make the
+remapping pointless.
+
+Options you set in `PCLOUD_FUSE_OPTS` yourself are never overwritten, matched
+per option key. That is also the escape hatch if your kernel/libfuse rejects
+one of these: set `PCLOUD_FUSE_OPTS` explicitly, or move to `PCLOUD_MOUNT` and
+`ENABLE_BINDFS=0`. The entrypoint logs the options it ended up passing, and a
+one-off deprecation notice, at startup.
 
 ## Security considerations
 
@@ -347,6 +355,7 @@ To limit the blast radius:
 - `no-new-privileges:true` prevents privilege escalation via setuid/setgid binaries.
 - `read_only: true` makes the root filesystem read-only; only the named volume and tmpfs mounts are writable.
 - All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) and `CHOWN` (mount-point ownership) are re-added.
+- `allow_other` — set explicitly via `PCLOUD_FUSE_OPTS`, or implicitly by `ENABLE_BINDFS=1` — makes the mount readable by every uid in the container, not just the one that created it. That is what lets the remapped `UID`/`GID` reach the files at all, but it is a widening: leave it off if nothing but `root` needs the mount.
 - The runtime layer carries no `ca-certificates` package and therefore no `openssl`/`libssl3`. pcloudcc validates pCloud's TLS certificates against fingerprints compiled into the binary, and nothing else in the image opens an outbound TLS connection; the generated CA bundle is still copied in from the build stage as a plain file at `/etc/ssl/certs/ca-certificates.crt`.
 
 A custom AppArmor profile that restricts the allowed syscalls to exactly those needed by FUSE would further reduce the attack surface but is not included here, as profiles are host-specific.

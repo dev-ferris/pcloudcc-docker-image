@@ -306,27 +306,59 @@ cleanup() {
 # Phases
 # ============================================================================
 
+# True when PCLOUD_FUSE_OPTS already carries option $1. Matched on the option
+# key, so `uid=0` counts as having set `uid`. Both sides are padded with the
+# delimiter so `uid` does not match the tail of an option like `rouid=`.
+fuse_opt_present() {
+  case ",${PCLOUD_FUSE_OPTS}," in
+    *",$1,"*|*",$1="*) return 0 ;;
+  esac
+  return 1
+}
+
+fuse_opt_append() {
+  if [ -z "${PCLOUD_FUSE_OPTS}" ]; then
+    PCLOUD_FUSE_OPTS="$1"
+  else
+    PCLOUD_FUSE_OPTS="${PCLOUD_FUSE_OPTS},$1"
+  fi
+}
+
 # bindfs is no longer installed (see the Dockerfile for why). ENABLE_BINDFS,
 # BINDFS_TARGET, UID and GID are still read and validated so existing .env
-# files and compose overrides start rather than abort.
+# files and compose overrides keep working unchanged.
 #
 # ENABLE_BINDFS=1 used to mean: pcloudcc mounts at PCLOUD_MOUNT, and bindfs
-# re-exports that at BINDFS_TARGET with ownership rewritten to UID:GID. Of
-# those two halves, the path is the one deployments actually depend on —
-# BINDFS_TARGET is what docker-compose.yml bind-mounts to the host — so it is
-# preserved by moving the pcloudcc mount there directly. The ownership rewrite
-# is gone with the overlay that performed it; PCLOUD_FUSE_OPTS is the remaining
-# lever, and the warning below points at it rather than failing silently.
+# re-exports that at BINDFS_TARGET with file ownership rewritten to UID:GID.
+# Both halves are reproduced without the second FUSE layer:
+#
+#   path       - pcloudcc mounts at BINDFS_TARGET directly. That is the path
+#                docker-compose.yml bind-mounts to the host, so a volume
+#                mapping written for the overlay keeps pointing at the data.
+#   ownership  - uid=/gid= are handed to pcloudcc's own FUSE mount via
+#                --fuse-opts, which makes it report the ownership the overlay
+#                used to rewrite. allow_other comes with them: the mount is
+#                created by root, and without it the kernel refuses every
+#                other uid access to the mount - including the UID the files
+#                are now reported as belonging to, which would make the
+#                remapping useless.
+#
+# An explicitly set PCLOUD_FUSE_OPTS wins per option key: it is the more
+# specific instruction, and leaving it intact is also the escape hatch if a
+# particular libfuse/kernel combination rejects one of these options.
 apply_bindfs_compat() {
   [ "${ENABLE_BINDFS}" = "1" ] || return 0
 
-  echo "WARNING: ENABLE_BINDFS=1 is deprecated - bindfs is no longer part of this image." >&2
-  echo "         Mounting pcloudcc directly at BINDFS_TARGET ('${BINDFS_TARGET}') instead," >&2
-  echo "         so the path stays where your volume mapping expects it." >&2
-  echo "         UID=${UID}/GID=${GID} are no longer applied. If you need that remapping," >&2
-  echo "         try PCLOUD_FUSE_OPTS=uid=${UID},gid=${GID} and verify the mount comes up." >&2
-
   PCLOUD_MOUNT="${BINDFS_TARGET}"
+
+  fuse_opt_present uid         || fuse_opt_append "uid=${UID}"
+  fuse_opt_present gid         || fuse_opt_append "gid=${GID}"
+  fuse_opt_present allow_other || fuse_opt_append "allow_other"
+
+  echo "NOTICE: ENABLE_BINDFS=1 is deprecated - bindfs is no longer part of this image." >&2
+  echo "        Mounting pcloudcc at BINDFS_TARGET ('${BINDFS_TARGET}') with" >&2
+  echo "        --fuse-opts '${PCLOUD_FUSE_OPTS}' instead of layering an overlay on top." >&2
+  echo "        Set PCLOUD_MOUNT and PCLOUD_FUSE_OPTS directly to silence this." >&2
 }
 
 # With read_only: true the container FS is immutable; the mount point must be
