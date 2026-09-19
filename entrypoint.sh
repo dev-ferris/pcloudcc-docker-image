@@ -28,7 +28,6 @@ set -eu
 : "${PCLOUD_FUSE_OPTS:=}"
 
 PCLOUD_PID=""
-BINDFS_PID=""
 
 # ============================================================================
 # Filesystem / process helpers
@@ -166,11 +165,11 @@ validate_inputs() {
   esac
 
   validate_mount_path PCLOUD_MOUNT "${PCLOUD_MOUNT}"
+  # Checked before apply_bindfs_compat() promotes it to PCLOUD_MOUNT. The two
+  # are no longer required to differ: with bindfs gone there is no second layer
+  # to stack on top, so BINDFS_TARGET *becomes* the pcloudcc mount point.
   if [ "${ENABLE_BINDFS}" = "1" ]; then
     validate_mount_path BINDFS_TARGET "${BINDFS_TARGET}"
-    if [ "${BINDFS_TARGET}" = "${PCLOUD_MOUNT}" ]; then
-      echo "ERROR: BINDFS_TARGET must differ from PCLOUD_MOUNT" >&2; exit 1
-    fi
   fi
 }
 
@@ -293,17 +292,9 @@ cleanup() {
   trap - TERM INT EXIT
   echo "Shutting down..."
 
-  # Unmount before signalling: a clean unmount makes bindfs exit by itself and
-  # leaves no stale mount point behind. Killing it first would tear the process
-  # down while the kernel still has the FUSE mount attached.
-  if [ "${ENABLE_BINDFS}" = "1" ]; then
-    fuse_unmount "${BINDFS_TARGET}"
-  fi
-  if [ -n "${BINDFS_PID}" ] && kill -0 "${BINDFS_PID}" 2>/dev/null; then
-    kill -TERM "${BINDFS_PID}" 2>/dev/null || true
-    wait_for_exit "${BINDFS_PID}" 5 || kill -KILL "${BINDFS_PID}" 2>/dev/null || true
-  fi
-
+  # There is exactly one FUSE mount left to tear down (PCLOUD_MOUNT, wherever
+  # apply_bindfs_compat() pointed it), and stop_pcloudcc() owns it.
+  #
   # Graceful pcloudcc shutdown - give it time to finish pending transfers
   if [ -n "${PCLOUD_PID}" ] && kill -0 "${PCLOUD_PID}" 2>/dev/null; then
     echo "Stopping pcloudcc gracefully..."
@@ -315,8 +306,121 @@ cleanup() {
 # Phases
 # ============================================================================
 
-# With read_only: true the container FS is immutable; /pcloud_internal must be
-# listed under tmpfs (or pre-created in the image) so mkdir/chown can succeed.
+# True when PCLOUD_FUSE_OPTS already carries option $1. Matched on the option
+# key, so `uid=0` counts as having set `uid`. Both sides are padded with the
+# delimiter so `uid` does not match the tail of an option like `rouid=`.
+fuse_opt_present() {
+  case ",${PCLOUD_FUSE_OPTS}," in
+    *",$1,"*|*",$1="*) return 0 ;;
+  esac
+  return 1
+}
+
+fuse_opt_append() {
+  if [ -z "${PCLOUD_FUSE_OPTS}" ]; then
+    PCLOUD_FUSE_OPTS="$1"
+  else
+    PCLOUD_FUSE_OPTS="${PCLOUD_FUSE_OPTS},$1"
+  fi
+}
+
+# bindfs is no longer installed (see the Dockerfile for why). ENABLE_BINDFS,
+# BINDFS_TARGET, UID and GID are still read and validated so existing .env
+# files and compose overrides keep working unchanged.
+#
+# ENABLE_BINDFS=1 used to mean: pcloudcc mounts at PCLOUD_MOUNT, and bindfs
+# re-exports that at BINDFS_TARGET with file ownership rewritten to UID:GID.
+# Both halves are reproduced without the second FUSE layer:
+#
+#   path       - pcloudcc mounts at BINDFS_TARGET directly. That is the path
+#                docker-compose.yml bind-mounts to the host, so a volume
+#                mapping written for the overlay keeps pointing at the data.
+#   ownership  - uid=/gid= are handed to pcloudcc's own FUSE mount via
+#                --fuse-opts, which makes it report the ownership the overlay
+#                used to rewrite. allow_other comes with them: the mount is
+#                created by root, and without it the kernel refuses every
+#                other uid access to the mount - including the UID the files
+#                are now reported as belonging to, which would make the
+#                remapping useless.
+#   enforcement - default_permissions comes with allow_other, for the reason
+#                spelled out at warn_unenforced_mount() below. bindfs added it
+#                unconditionally next to its own allow_other, so leaving it out
+#                here would have silently dropped access control that the
+#                overlay did perform.
+#
+# An explicitly set PCLOUD_FUSE_OPTS wins per option key: it is the more
+# specific instruction, and leaving it intact is also the escape hatch if a
+# particular libfuse/kernel combination rejects one of these options.
+apply_bindfs_compat() {
+  [ "${ENABLE_BINDFS}" = "1" ] || return 0
+
+  PCLOUD_MOUNT="${BINDFS_TARGET}"
+
+  fuse_opt_present uid                 || fuse_opt_append "uid=${UID}"
+  fuse_opt_present gid                 || fuse_opt_append "gid=${GID}"
+  fuse_opt_present allow_other         || fuse_opt_append "allow_other"
+  fuse_opt_present default_permissions || fuse_opt_append "default_permissions"
+
+  echo "NOTICE: ENABLE_BINDFS=1 is deprecated - bindfs is no longer part of this image." >&2
+  echo "        Mounting pcloudcc at BINDFS_TARGET ('${BINDFS_TARGET}') with" >&2
+  echo "        --fuse-opts '${PCLOUD_FUSE_OPTS}' instead of layering an overlay on top." >&2
+  echo "        Set PCLOUD_MOUNT and PCLOUD_FUSE_OPTS directly to silence this." >&2
+}
+
+# allow_other lets every uid reach the mount. default_permissions is what makes
+# the kernel then enforce the ownership and mode bits the filesystem reports
+# against that uid -- without it FUSE delegates access control to the
+# filesystem, and pcloudcc implements none: psync_oper (upstream pclsync/pfs.c)
+# binds 29 handlers and `access` is not among them, and the PSYNC_PERM_MODIFY
+# checks in pfs_open are pCloud's per-path account permissions, identical for
+# every local caller. allow_other without default_permissions therefore hands
+# any uid that can reach the mount full read/write over the whole pCloud
+# account, whatever ownership `ls` shows -- and because PCLOUD_MOUNT is
+# normally the rshared bind mount, "any uid" means any local account on the
+# host. Upstream's own doc/USAGE.md example pairs the two for this reason.
+#
+# apply_bindfs_compat() sets both. This catches the other route in: a
+# PCLOUD_FUSE_OPTS written by hand.
+warn_unenforced_mount() {
+  fuse_opt_present allow_other || return 0
+  if fuse_opt_present default_permissions; then
+    return 0
+  fi
+
+  echo "WARNING: PCLOUD_FUSE_OPTS enables 'allow_other' without 'default_permissions'." >&2
+  echo "         pcloudcc performs no access checks of its own, so the kernel will not" >&2
+  echo "         enforce the ownership it reports: every uid that can reach" >&2
+  echo "         '${PCLOUD_MOUNT}' gets full read/write access to your pCloud account," >&2
+  echo "         including the Crypto Folder once it is unlocked. Add" >&2
+  echo "         'default_permissions' unless that is what you want." >&2
+}
+
+# /pcloud_internal was the PCLOUD_MOUNT default for as long as bindfs re-exported
+# it at /pcloud. With the overlay gone there is only one mount left and the
+# default is /pcloud itself, so the old path has no role.
+#
+# One migration goes wrong quietly: a setup that ran ENABLE_BINDFS=0 and
+# bind-mounted the host at /pcloud_internal (which an earlier README told people
+# to do) still has that bind mount, but the pCloud filesystem now lands at
+# /pcloud instead. Nothing errors - the host directory simply stays empty, which
+# reads like a broken sync rather than a moved mount point. Say so instead.
+warn_legacy_mount_point() {
+  _legacy="/pcloud_internal"
+  if [ "${PCLOUD_MOUNT}" = "${_legacy}" ]; then
+    return 0
+  fi
+  mountpoint -q "${_legacy}" 2>/dev/null || return 0
+
+  echo "WARNING: something is still mounted at '${_legacy}', but pcloudcc now mounts" >&2
+  echo "         at '${PCLOUD_MOUNT}'. '${_legacy}' was the default only while the bindfs" >&2
+  echo "         overlay existed and is no longer used for anything." >&2
+  echo "         If that is your host bind mount, either repoint it at '${PCLOUD_MOUNT}'" >&2
+  echo "         or set PCLOUD_MOUNT=${_legacy}; otherwise drop it from docker-compose.yml." >&2
+}
+
+# With read_only: true the container FS is immutable; the mount point must be
+# listed under tmpfs, bind-mounted from the host, or pre-created in the image
+# so mkdir/chown can succeed.
 prepare_mount_point() {
   if ! mkdir -p "${PCLOUD_MOUNT}" 2>/dev/null; then
     echo "ERROR: Cannot create mount point '${PCLOUD_MOUNT}'." >&2
@@ -499,21 +603,14 @@ unlock_crypto() {
   unset _crypto_log _waited _unlocked
 }
 
-start_bindfs_overlay() {
-  [ "${ENABLE_BINDFS}" = "1" ] || return 0
-  (
-    wait_for_mount "${PCLOUD_MOUNT}" "bindfs"
-    echo "[bindfs] Mounting ${PCLOUD_MOUNT} -> ${BINDFS_TARGET} (uid=${UID}, gid=${GID})"
-    exec bindfs -f -u "${UID}" -g "${GID}" "${PCLOUD_MOUNT}" "${BINDFS_TARGET}"
-  ) &
-  BINDFS_PID=$!
-}
-
 # ============================================================================
 # Main
 # ============================================================================
 
 validate_inputs
+apply_bindfs_compat
+warn_unenforced_mount
+warn_legacy_mount_point
 load_secrets
 prepare_mount_point
 log_provided_secrets
@@ -533,7 +630,5 @@ unlock_crypto
 
 # Clear remaining secrets from the environment after startup.
 unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
-
-start_bindfs_overlay
 
 wait "${PCLOUD_PID}"

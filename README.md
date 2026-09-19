@@ -24,7 +24,7 @@ This project is essentially a Docker packaging layer. All the real work happens 
 - Supports EU and US pCloud regions
 - Optional 2FA support, with unattended first-time login via `PCLOUD_TOTP_SECRET` (TOTP shared secret)
 - Optional crypto folder unlock
-- Built-in `bindfs` for UID/GID remapping (useful on NAS setups)
+- Minimal runtime layer: no `bindfs`, no `ca-certificates`/`openssl` (see [How it works](#how-it-works))
 - Healthcheck included
 - POSIX-compliant entrypoint script with graceful shutdown
 - Compatible environment variables with the `DjSni/docker-image-pCloud` setup
@@ -102,12 +102,12 @@ services:
     env_file:
       - .env
     environment:
-      - ENABLE_BINDFS=1
+      - PCLOUD_MOUNT=/pcloud
+      - PCLOUD_FUSE_OPTS=uid=1000,gid=1000,allow_other,default_permissions
     read_only: true
     tmpfs:
       - /tmp
       - /run
-      - /pcloud_internal
     security_opt:
       - apparmor:unconfined
       - no-new-privileges:true
@@ -127,7 +127,7 @@ services:
         max-file: "3"
 ```
 
-> **Note:** `/pcloud_internal` must be in the `tmpfs` list when `read_only: true` is used, otherwise the entrypoint can't create or chown the mount point.
+> **Note:** with `read_only: true` the entrypoint can only create and chown `PCLOUD_MOUNT` if that path is writable — either bind-mounted from the host as above, or listed under `tmpfs`. If you point `PCLOUD_MOUNT` somewhere that is neither, startup fails with an explicit error.
 > Once first-time login is complete, remove `stdin_open` and `tty` to reduce the interactive attack surface.
 
 Then jump straight to [step 2](#2-create-your-env-file).
@@ -193,8 +193,6 @@ PCLOUD_USER=your@email.com
 PCLOUD_PASSWORD=your_account_password
 PCLOUD_TOTP_SECRET=JBSWY3DPEHPK3PXP   # base32 secret from your authenticator (if 2FA is enabled)
 PCLOUD_CRYPT=your_crypto_password
-UID=1000
-GID=1000
 ```
 
 #### 3. Adjust volume paths in `docker-compose.yml`
@@ -242,13 +240,15 @@ Leave `PCLOUD_PASSWORD` unset. The container logs will show:
 No saved credentials found. Either set PCLOUD_PASSWORD (and PCLOUD_TOTP_SECRET
 or PCLOUD_2FA if 2FA is enabled) for automatic login, or run the following
 inside the container:
-  docker exec -it <container> pcloudcc -u your@email.com -m /pcloud_internal -p -s
+  docker exec -it <container> pcloudcc -u your@email.com -m /pcloud -p -s
 ```
 
-Run that command (substituting your container name, e.g. `pcloud`):
+Run that command (substituting your container name, e.g. `pcloud`). The `-m`
+path is whatever `PCLOUD_MOUNT` is set to — the message above already contains
+the right one, so copy it from your own logs rather than from here:
 
 ```bash
-docker exec -it pcloud pcloudcc -u your@email.com -m /pcloud_internal -p -s
+docker exec -it pcloud pcloudcc -u your@email.com -m /pcloud -p -s
 ```
 
 Enter your password when prompted. If you have 2FA enabled, append `-t <code>`
@@ -273,17 +273,17 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_2FA` | No | — | Single-use 2FA code (alternative to `PCLOUD_TOTP_SECRET` — codes expire after ~30s) |
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
 | `PCLOUD_CRYPT_FILE` | No | — | Path to a file with the crypto password (e.g. `/run/secrets/pcloud_crypt`); takes precedence over `PCLOUD_CRYPT` |
-| `PCLOUD_MOUNT` | No | `/pcloud_internal` | Internal mount point (where pcloudcc mounts) |
-| `ENABLE_BINDFS` | No | `0` | Set to `1` to enable bindfs UID/GID remapping |
-| `BINDFS_TARGET` | No | `/pcloud` | Target path for bindfs overlay |
-| `UID` | No | `1000` | User ID for bindfs remapping |
-| `GID` | No | `1000` | Group ID for bindfs remapping |
-| `USER` | No | `nobody` | Username that owns the internal mount point |
-| `GROUP` | No | `users` | Group that owns the internal mount point |
+| `PCLOUD_MOUNT` | No | `/pcloud` | Where pcloudcc mounts the pCloud filesystem. Must match the host bind mount in `docker-compose.yml` |
+| `USER` | No | `nobody` | Username that owns the mount point |
+| `GROUP` | No | `users` | Group that owns the mount point |
+| `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` mounts at `BINDFS_TARGET` and fills `PCLOUD_FUSE_OPTS` with `uid=$UID,gid=$GID,allow_other,default_permissions` |
+| `BINDFS_TARGET` | No | `/pcloud` | **Deprecated.** Becomes `PCLOUD_MOUNT` when `ENABLE_BINDFS=1` |
+| `UID` | No | `1000` | **Deprecated.** Applied as the FUSE `uid=` option when `ENABLE_BINDFS=1` |
+| `GID` | No | `1000` | **Deprecated.** Applied as the FUSE `gid=` option when `ENABLE_BINDFS=1` |
 | `MOUNT_TIMEOUT` | No | `60` | Seconds to wait for a mount to become ready (raise to 120+ on slow ARM devices or high-latency links) |
 | `PCLOUD_CACHE_SIZE` | No | — | pcloudcc's local cache limit in GB (its own default is 5). The cache lives in the `pconfig` volume. |
 | `PCLOUD_LOG_LEVEL` | No | — | Verbosity of pcloudcc's own `debug.log`: `NONE`, `ERROR`, `WARNING`, `INFO` (its own default), `NOTICE`, `DEBUG` |
-| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000`, `allow_other`) |
+| `PCLOUD_FUSE_OPTS` | No | — | Extra FUSE mount options, comma-separated (e.g. `uid=1000,gid=1000,allow_other,default_permissions`). Options set here are never overwritten by `ENABLE_BINDFS=1`. Always pair `allow_other` with `default_permissions` — see [Security considerations](#security-considerations) |
 
 The last three are passed straight through to `pcloudcc` and are omitted entirely
 when unset, so its built-in defaults apply. They need an upstream build from
@@ -305,26 +305,68 @@ container's stdout/stderr:
 
 ## How it works
 
-When `ENABLE_BINDFS=1` (the default in the compose file), the container mounts two filesystems:
+There is exactly one filesystem in play: **pcloudcc** mounts your pCloud drive at
+`PCLOUD_MOUNT`, which the compose file sets to `/pcloud` and shares to the host
+via the `rshared` volume mount. Point `PCLOUD_MOUNT` and the host bind mount at
+the same path and you are done.
 
-1. **pcloudcc** mounts your pCloud drive to `/pcloud_internal` (owned by root inside the container)
-2. **bindfs** overlays `/pcloud_internal` to `/pcloud` with the UID/GID you specified
+Set `USER`/`GROUP` if you care about the ownership of the mount point itself; it
+is `chown`ed before pcloudcc mounts over it, so with the compose file above this
+applies to the host directory while it is still empty.
 
-The `/pcloud` path is then shared to the host via the `rshared` volume mount, so files appear with the correct ownership on your host system.
+### What happened to bindfs
 
-If you don't need UID/GID remapping, set `ENABLE_BINDFS=0` **and** change the host bind mount in `docker-compose.yml` from `:/pcloud:rshared` to `:/pcloud_internal:rshared` (and drop the `/pcloud_internal` entry from `tmpfs` — otherwise the host mount would be shadowed by the tmpfs and data would not persist).
+Earlier versions ran a second FUSE process: pcloudcc mounted at
+`/pcloud_internal` and `bindfs` re-exported that at `/pcloud` with file
+ownership rewritten to `UID:GID`. That is gone. It doubled the FUSE layers for
+what is really a mount-option concern, and `bindfs` is packaged only in
+Debian/Ubuntu — Alpine carries it in `edge/testing` only — which tied the image
+to a Debian base and kept its CVE feed attached to the scan results.
+
+Existing configurations keep working, including the UID/GID remapping. Both
+halves of the old behaviour are reproduced on pcloudcc's own mount, so
+`ENABLE_BINDFS=1` needs no change on your side:
+
+| | Before | Now |
+|---|---|---|
+| Path | pcloudcc at `/pcloud_internal`, bindfs re-exports at `BINDFS_TARGET` | pcloudcc mounts at `BINDFS_TARGET` directly |
+| Ownership | `bindfs -u $UID -g $GID` rewrites it | `--fuse-opts uid=$UID,gid=$GID` makes pcloudcc report it |
+| Access control | bindfs adds `allow_other` + `default_permissions` | the same two options, added alongside |
+| Processes | `pcloudcc` + `bindfs` | `pcloudcc` |
+
+`allow_other` is part of the set rather than an extra: the mount is created by
+root, and without it the kernel denies access to every other uid — including
+the one the files are now reported as belonging to, which would make the
+remapping pointless. `default_permissions` is equally non-optional, and for a
+less obvious reason — see [Security considerations](#security-considerations).
+
+Options you set in `PCLOUD_FUSE_OPTS` yourself are never overwritten, matched
+per option key. That is also the escape hatch if your kernel/libfuse rejects
+one of these: set `PCLOUD_FUSE_OPTS` explicitly, or move to `PCLOUD_MOUNT` and
+`ENABLE_BINDFS=0`. The entrypoint logs the options it ended up passing, and a
+one-off deprecation notice, at startup.
 
 ## Security considerations
 
 ### Why root and SYS_ADMIN?
 
-FUSE mounts require mounting capabilities that are not available to unprivileged processes. The container therefore runs as root with `CAP_SYS_ADMIN`. This is the minimum required for `pcloudcc` and `bindfs` to create FUSE mounts inside Docker.
+FUSE mounts require mounting capabilities that are not available to unprivileged processes. The container therefore runs as root with `CAP_SYS_ADMIN`. This is the minimum required for `pcloudcc` to create a FUSE mount inside Docker.
 
 To limit the blast radius:
 
 - `no-new-privileges:true` prevents privilege escalation via setuid/setgid binaries.
 - `read_only: true` makes the root filesystem read-only; only the named volume and tmpfs mounts are writable.
-- All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) and `CHOWN` (internal mount-point ownership) are re-added.
+- All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) and `CHOWN` (mount-point ownership) are re-added.
+- `allow_other` — set explicitly via `PCLOUD_FUSE_OPTS`, or implicitly by `ENABLE_BINDFS=1` — makes the mount reachable by every uid, not just the one that created it. That is what lets the remapped `UID`/`GID` reach the files at all, but it is a widening: leave it off if nothing but `root` needs the mount.
+
+### Why `allow_other` must be paired with `default_permissions`
+
+FUSE does not enforce the mode bits a filesystem reports unless the mount carries `default_permissions`; without it, access control is the filesystem's own job. `pcloudcc` does not do that job — upstream's `psync_oper` binds 29 handlers and `access` is not one of them, and the `PSYNC_PERM_MODIFY` checks in `pfs_open` are pCloud's per-path *account* permissions, which are identical no matter which local uid is calling.
+
+So `allow_other` on its own means every uid that can reach the mount has full read/write over the entire pCloud account — including the decrypted `Crypto Folder` after unlock — regardless of the `1000:1000` / `0644` ownership `ls` displays. Since the mount is normally the `rshared` bind mount, "every uid that can reach it" means every local account on the host, including service accounts.
+
+`bindfs` never had this gap: it added `-odefault_permissions` unconditionally next to its own `-oallow_other`. `ENABLE_BINDFS=1` and the shipped compose file therefore set both, and the entrypoint prints a warning if it finds `allow_other` in a hand-written `PCLOUD_FUSE_OPTS` without it.
+- The runtime layer carries no `ca-certificates` package and therefore no `openssl`/`libssl3`. pcloudcc validates pCloud's TLS certificates against fingerprints compiled into the binary, and nothing else in the image opens an outbound TLS connection; the generated CA bundle is still copied in from the build stage as a plain file at `/etc/ssl/certs/ca-certificates.crt`.
 
 A custom AppArmor profile that restricts the allowed syscalls to exactly those needed by FUSE would further reduce the attack surface but is not included here, as profiles are host-specific.
 
