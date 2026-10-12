@@ -40,7 +40,9 @@ RUN git init -q \
     && strip pcloudcc
 
 # ===== Stage 2: Runtime =====
-FROM debian:trixie-slim
+# Named so the workflow can exclude exactly this stage from the build cache
+# (no-cache-filters) - see the comment on the apt layer below.
+FROM debian:trixie-slim AS runtime
 
 # licenses/source describe this image (the packaging layer, MIT). The bundled
 # pcloudcc binary itself is BSD-3-Clause; its origin is recorded separately.
@@ -61,8 +63,9 @@ LABEL org.opencontainers.image.title="pcloudcc" \
 #                 to Debian. ENABLE_BINDFS/BINDFS_TARGET/UID/GID are still
 #                 accepted by entrypoint.sh - see the shim there.
 #   ca-certificates
-#               - it Depends on openssl, so installing it dragged openssl,
-#                 libssl3 and debconf into the runtime layer for Trivy to scan.
+#               - it Depends on openssl, so installing it dragged the openssl
+#                 CLI into the runtime layer for Trivy to scan. (libssl3t64
+#                 itself stays: apt and coreutils in the base image need it.)
 #                 pcloudcc speaks TLS through mbedTLS against pinned pCloud
 #                 certificate fingerprints compiled into the binary, and nothing
 #                 else in this image makes an outbound TLS connection. The trust
@@ -81,7 +84,15 @@ LABEL org.opencontainers.image.title="pcloudcc" \
 # `read_only: true` it could not be created at runtime unless it is
 # bind-mounted or a tmpfs. (/pcloud_internal is gone: it only existed as the
 # private lower layer under the bindfs overlay.)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# `apt-get upgrade` first: the debian:trixie-slim tag on Docker Hub is only
+# rebuilt every few weeks, while Debian ships security fixes for packages that
+# are already in it (libssl3t64, libpcre2-8-0, ...) in between. Without the
+# upgrade the Trivy gate fails on those fixed-but-not-installed CVEs until
+# Docker Hub catches up. The workflow rebuilds this stage on every run
+# (no-cache-filters: runtime), so a cached layer can't freeze them either.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     fuse3 \
     libfuse3-4 \
     libudev1 \

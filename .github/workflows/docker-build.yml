@@ -176,6 +176,12 @@ jobs:
           # without building anything. Bypass the cache on schedule so apt
           # actually re-resolves against the current archive.
           no-cache: ${{ github.event_name == 'schedule' }}
+          # The runtime stage is only an apt-get install of a few packages, so
+          # always rebuild it. Restoring it from the cache shipped whatever
+          # Debian packages were current at the last scheduled run, and a
+          # PR/push build failed the Trivy gate on CVEs Debian had fixed since
+          # (PR #52). The builder stage (the slow compile) stays cached.
+          no-cache-filters: runtime
           # Read from the shared cache; don't write — the full multi-platform
           # build below will update it.
           cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache', env.REGISTRY, env.IMAGE_NAME) || '' }}
@@ -240,8 +246,9 @@ jobs:
             # again by accident.
             if [ -e /usr/bin/bindfs ]; then
               echo "ERROR: bindfs is back in the runtime image"; exit 1; fi
-            # ca-certificates (and with it openssl/libssl3) was dropped in favour
+            # ca-certificates (and with it the openssl CLI) was dropped in favour
             # of copying just the generated bundle out of the builder stage.
+            # libssl3t64 itself is part of the base image (apt, coreutils).
             test -s /etc/ssl/certs/ca-certificates.crt
             if command -v openssl >/dev/null 2>&1; then
               echo "ERROR: openssl is back in the runtime image"; exit 1; fi
@@ -288,6 +295,10 @@ jobs:
             PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
           provenance: mode=max
           sbom: true
+          # Same as the scan build: never take the runtime stage from the cache,
+          # or the arm64/arm-v7 images would ship stale Debian packages that the
+          # (amd64-only) Trivy gate never saw.
+          no-cache-filters: runtime
           # BuildKit reuses layers from the scan build above (same daemon), so
           # this is effectively just the push for amd64, not a full rebuild.
           # On scheduled runs the registry cache is skipped for the same reason
@@ -311,10 +322,21 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           # Keyless sign every tag reference against the pushed manifest digest.
+          # Fulcio/Rekor hiccups are transient (e.g. "Fulcio returned 400 ...
+          # CANCELLED") and the images are already pushed at this point, so
+          # retry a few times instead of failing the whole run on one blip.
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             echo "Signing ${tag}@${DIGEST}"
-            cosign sign --yes "${tag}@${DIGEST}"
+            for attempt in 1 2 3 4; do
+              cosign sign --yes "${tag}@${DIGEST}" && break
+              if [ "$attempt" -eq 4 ]; then
+                echo "::error::cosign failed 4 times for ${tag}"
+                exit 1
+              fi
+              echo "cosign attempt ${attempt} failed, retrying in $((attempt * 15))s"
+              sleep $((attempt * 15))
+            done
           done <<< "$TAGS"
 
       - name: Upload Trivy scan results to GitHub Security tab
