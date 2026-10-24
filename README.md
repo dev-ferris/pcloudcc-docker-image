@@ -92,7 +92,7 @@ services:
   pcloud:
     image: ghcr.io/dev-ferris/pcloudcc-docker-image:latest
     # Or, from Docker Hub:
-    # image: <your-dockerhub-user>/pcloudcc-docker-image:latest
+    # image: devferris/pcloudcc-docker-image:latest
     restart: unless-stopped
     init: true               # zombie reaping + signal forwarding
     stop_grace_period: 30s   # allow graceful pcloudcc shutdown + FUSE unmount
