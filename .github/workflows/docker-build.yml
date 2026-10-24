@@ -243,7 +243,9 @@ jobs:
         run: |
           docker load -i /tmp/scan-image.tar
           IMAGE="$(printf '%s\n' "$TAGS" | head -n1)"
-          docker run --rm --entrypoint /bin/sh "$IMAGE" -c '
+          # --cap-drop ALL as in docker-compose.yml: without CAP_DAC_OVERRIDE
+          # root is bound by file modes, so permission mistakes show up here.
+          docker run --rm --cap-drop ALL --entrypoint /bin/sh "$IMAGE" -c '
             set -e
             test -x /usr/local/bin/pcloudcc
             test -x /entrypoint.sh
@@ -251,6 +253,9 @@ jobs:
             # Both scripts run under /bin/sh in this image; a syntax error would
             # otherwise only surface at container start.
             test -r /usr/local/lib/pcloudcc/common.sh
+            # Both scripts source it; this is what failed at container start
+            # when the directory lacked the search bit.
+            ( . /usr/local/lib/pcloudcc/common.sh )
             sh -n /entrypoint.sh
             sh -n /healthcheck.sh
             sh -n /usr/local/lib/pcloudcc/common.sh

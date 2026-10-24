@@ -61,6 +61,11 @@ LABEL org.opencontainers.image.title="pcloudcc" \
 #
 # /pcloud is the default mount point; created here so it exists even with
 # read_only: true and no bind mount.
+#
+# /usr/local/lib/pcloudcc must exist before the COPY --chmod=644 below:
+# BuildKit applies --chmod to parent directories it creates as well, which
+# leaves a directory without the search bit. With cap_drop: ALL, root has no
+# CAP_DAC_OVERRIDE and then cannot open common.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fuse3 \
     libfuse3-4 \
@@ -72,7 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     oathtool \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /pcloud
+    && mkdir -p /pcloud /usr/local/lib/pcloudcc
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
