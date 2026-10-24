@@ -1,12 +1,33 @@
 volumes:
   pconfig: {}
 
+# Credentials as secret files instead of environment variables: environment
+# variables stay readable via `docker inspect` for the container's lifetime,
+# secret files do not. Works with plain `docker compose`, no Swarm needed.
+# To use them, create the files (one value per file, chmod 600), uncomment
+# this block and the `secrets:` list in the service, and remove the matching
+# variables from .env. Only list the secrets you actually use — Compose
+# refuses to start if a listed file is missing. The entrypoint finds them
+# under /run/secrets/<name> on its own; no *_FILE variable is needed.
+#
+#   mkdir -p secrets && chmod 700 secrets
+#   printf '%s' 'your-password' > secrets/pcloud_password
+#   chmod 600 secrets/*
+#
+# secrets:
+#   pcloud_password:
+#     file: ./secrets/pcloud_password
+#   pcloud_totp_secret:
+#     file: ./secrets/pcloud_totp_secret
+#   pcloud_crypt:
+#     file: ./secrets/pcloud_crypt
+
 services:
   pcloud:
+    # Builds the upstream commit pinned in the Dockerfile. To build another
+    # one, add `args: { PCLOUDCC_REF: <tag or commit SHA> }`.
     build:
       context: .
-      args:
-        PCLOUDCC_REF: main
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards signals to the entrypoint.
     init: true
@@ -19,6 +40,11 @@ services:
       - /path/to/your/pcloud:/pcloud:rshared
     env_file:
       - .env
+    # See the top-level `secrets:` block above.
+    # secrets:
+    #   - pcloud_password
+    #   - pcloud_totp_secret
+    #   - pcloud_crypt
     environment:
       # PCLOUD_MOUNT is also the image default; it is spelled out because it
       # has to match the bind mount above, and the two should be edited
@@ -44,16 +70,11 @@ services:
       - no-new-privileges:true
     devices:
       - /dev/fuse
-    # Drop all default capabilities and add back only what is actually needed.
-    # SYS_ADMIN: required for FUSE mount/umount by pcloudcc.
-    # CHOWN:     required by entrypoint.sh to chown the mount point to USER:GROUP.
-    #            Note this now lands on the host directory bind-mounted above,
-    #            while it is still empty and before pcloudcc mounts over it.
+    # Drop all default capabilities; SYS_ADMIN is needed for the FUSE mount.
     cap_drop:
       - ALL
     cap_add:
       - SYS_ADMIN
-      - CHOWN
     # Required for first-time interactive login; can be removed after initial credential setup.
     stdin_open: true
     tty: true

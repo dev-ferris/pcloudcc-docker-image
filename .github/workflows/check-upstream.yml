@@ -1,19 +1,33 @@
 name: Check upstream for new commits
 
+# New upstream code never reaches `latest` without review. For a new commit on
+# upstream main this workflow
+#   1. opens (or updates) a pull request that moves the PCLOUDCC_REF pin in
+#      the Dockerfile — merging it is what releases the new code, and
+#   2. dispatches an `edge` build of that commit, so it is compiled, scanned
+#      and smoke-tested right away and can be tried as the `edge` image.
+# A new upstream tag only triggers the edge build.
+#
+# Pull requests opened with the default GITHUB_TOKEN do not trigger CI, and
+# the repository setting "Allow GitHub Actions to create and approve pull
+# requests" must be enabled. Store a fine-grained token with contents and
+# pull-requests write access as the UPSTREAM_BUMP_TOKEN secret to have CI run
+# on the PR automatically.
+
 on:
   schedule:
     # Check every 6 hours for new commits/tags in lneely/pcloudcc-lneely
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
-# A manual run overlapping the 6-hourly one would resolve the same SHA twice and
-# dispatch two identical builds. Serialize and drop the redundant older run.
+# A manual run overlapping the scheduled one would act on the same ref twice.
 concurrency:
   group: check-upstream
   cancel-in-progress: true
 
 env:
   UPSTREAM_REPO: lneely/pcloudcc-lneely
+  BUMP_BRANCH: upstream/pcloudcc-bump
 
 jobs:
   check-upstream:
@@ -21,7 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      actions: write
+      actions: write         # dispatch the edge build
+      contents: write        # push the bump branch
+      pull-requests: write   # open the bump PR
     strategy:
       # The two probes are independent: a missing tag must not hide a new
       # commit on main (and vice versa).
@@ -34,6 +50,8 @@ jobs:
             api: 'commits/main'
             jq: '.sha // empty'
             required: true
+            pattern: '^[0-9a-f]{40}$'
+            bump: true
             cache_path: upstream-sha.txt
             cache_prefix: upstream-sha
           # /tags returns the most recently created tag first. A fork without
@@ -42,6 +60,8 @@ jobs:
             api: 'tags?per_page=1'
             jq: '.[0].name // empty'
             required: false
+            pattern: '^[A-Za-z0-9._-]{1,100}$'
+            bump: false
             cache_path: upstream-tag.txt
             cache_prefix: upstream-tag
 
@@ -53,6 +73,7 @@ jobs:
           API_PATH: ${{ matrix.api }}
           JQ_FILTER: ${{ matrix.jq }}
           REQUIRED: ${{ matrix.required }}
+          PATTERN: ${{ matrix.pattern }}
         run: |
           REF=$(curl -sf -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -67,6 +88,13 @@ jobs:
             echo "ref=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The value comes from another repository and ends up in a sed
+          # expression, a branch name and a dispatch input. Accept only the
+          # expected shape.
+          if ! printf '%s' "${REF}" | grep -Eq "${PATTERN}"; then
+            echo "ERROR: unexpected upstream ref '${REF}' from '${API_PATH}'" >&2
+            exit 1
+          fi
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "Upstream ${API_PATH} resolved to: ${REF}"
 
@@ -78,28 +106,65 @@ jobs:
           path: ${{ matrix.cache_path }}
           key: ${{ matrix.cache_prefix }}-${{ steps.upstream.outputs.ref }}
 
-      - name: Trigger build on new upstream ref
+      - name: Checkout repository
+        if: matrix.bump && steps.upstream.outputs.ref != '' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.UPSTREAM_BUMP_TOKEN || github.token }}
+          path: repo
+
+      - name: Open pull request to move the pin
+        if: matrix.bump && steps.upstream.outputs.ref != '' && steps.cache.outputs.cache-hit != 'true'
+        working-directory: repo
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_BUMP_TOKEN || github.token }}
+          UPSTREAM_REF: ${{ steps.upstream.outputs.ref }}
+        run: |
+          current=$(sed -nE 's/^ARG PCLOUDCC_REF=([0-9a-f]{40})$/\1/p' Dockerfile)
+          if [ -z "${current}" ]; then
+            echo "ERROR: no 'ARG PCLOUDCC_REF=<sha>' line found in Dockerfile" >&2
+            exit 1
+          fi
+          if [ "${current}" = "${UPSTREAM_REF}" ]; then
+            echo "Dockerfile already pins ${UPSTREAM_REF}."
+            exit 0
+          fi
+
+          sed -i -E "s/^ARG PCLOUDCC_REF=[0-9a-f]{40}$/ARG PCLOUDCC_REF=${UPSTREAM_REF}/" Dockerfile
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${BUMP_BRANCH}"
+          git commit -qam "build(deps): pin pcloudcc to ${UPSTREAM_REF:0:12}"
+          git push -f origin "${BUMP_BRANCH}"
+
+          compare="https://github.com/${UPSTREAM_REPO}/compare/${current}...${UPSTREAM_REF}"
+          body="Moves the pinned upstream commit from \`${current:0:12}\` to \`${UPSTREAM_REF:0:12}\`.
+
+          Review the upstream changes before merging — merging publishes them as \`latest\`:
+          ${compare}
+
+          An \`edge\` image of this commit is built separately (tag \`edge-${UPSTREAM_REF}\`)."
+          if [ "$(gh pr view "${BUMP_BRANCH}" --json state -q .state 2>/dev/null)" = "OPEN" ]; then
+            gh pr edit "${BUMP_BRANCH}" --title "build(deps): pin pcloudcc to ${UPSTREAM_REF:0:12}" --body "${body}"
+            echo "Updated the existing pull request."
+          else
+            gh pr create --base "${GITHUB_REF_NAME}" --head "${BUMP_BRANCH}" \
+              --title "build(deps): pin pcloudcc to ${UPSTREAM_REF:0:12}" --body "${body}"
+          fi
+
+      - name: Trigger edge build of the new upstream ref
         if: steps.upstream.outputs.ref != '' && steps.cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM_REF: ${{ steps.upstream.outputs.ref }}
           CACHE_PATH: ${{ matrix.cache_path }}
         run: |
-          echo "New upstream ref detected: ${UPSTREAM_REF}"
-          # Pass the resolved SHA/tag, not the branch name. PCLOUDCC_REF is a
-          # Docker build arg, so it is part of the cache key of the layer that
-          # fetches and compiles upstream. Triggering with the literal "main"
-          # produced the same cache key as the previous build and the new
-          # upstream code was never compiled — the build "succeeded" while
-          # shipping the old binary. A SHA is unique per commit and therefore
-          # both busts the cache and pins the build reproducibly.
+          # Passing the resolved SHA/tag (not "main") also busts the Docker
+          # layer cache, which is keyed on the PCLOUDCC_REF build arg.
           gh workflow run docker-build.yml \
             --repo "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF_NAME}" \
             -f pcloudcc_ref="${UPSTREAM_REF}"
-          echo "Build workflow triggered for ref=${UPSTREAM_REF}."
-          # Write the cache marker only once the dispatch actually succeeded,
-          # so the file that records "this ref is handled" can never outlive a
-          # failed `gh workflow run`. (actions/cache's post step is `post-if:
-          # success()`, so today a failed dispatch already skips the save —
-          # this just stops that from being load-bearing.)
+          echo "Edge build triggered for ref=${UPSTREAM_REF}."
+          # Mark the ref as handled only once everything above succeeded.
           echo "${UPSTREAM_REF}" > "${CACHE_PATH}"

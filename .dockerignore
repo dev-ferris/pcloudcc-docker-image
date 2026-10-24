@@ -5,3 +5,4 @@
 *
 !entrypoint.sh
 !healthcheck.sh
+!common.sh
