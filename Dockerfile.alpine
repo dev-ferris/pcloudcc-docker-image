@@ -1,0 +1,137 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# pcloudcc Docker Image - lneely/pcloudcc-lneely fork, Alpine (musl) variant
+# Base: alpine:3.24
+#
+# Same behaviour as the Debian image (Dockerfile), at a fraction of its size.
+# Published with an `-alpine` tag suffix. The base image is pinned by digest;
+# Dependabot proposes updates as PRs.
+# =============================================================================
+
+# ===== Stage 1: Build =====
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS builder
+
+# Must match the pin in Dockerfile; check-upstream.yml moves both together.
+# Keep it on one line: the workflow rewrites it.
+ARG PCLOUDCC_REF=93a99cd6add26ffc403113d1a8f7fca34274fa02
+
+# Dependencies per upstream doc/BUILD.md, plus:
+#   pkgconf       - the Makefile locates fuse3 and mbedtls with pkg-config
+#   linux-headers - kernel headers; part of the toolchain on Debian
+#   libunwind-dev - pclsync/psynclib.c includes <libunwind.h> when not built
+#                   against glibc (headers only, nothing is linked)
+RUN apk add --no-cache \
+    git \
+    build-base \
+    pkgconf \
+    linux-headers \
+    fuse3-dev \
+    eudev-dev \
+    mbedtls-dev \
+    readline-dev \
+    sqlite-dev \
+    zlib-dev \
+    libunwind-dev
+
+# musl has no <execinfo.h>. pclsync/psignal.c includes it unconditionally to
+# print a backtrace on panic; this stub makes that backtrace empty and leaves
+# everything else unchanged. Only /build/compat is searched for it.
+COPY <<'EOF' /build/compat/execinfo.h
+#ifndef PCLOUDCC_EXECINFO_SHIM_H
+#define PCLOUDCC_EXECINFO_SHIM_H
+static inline int backtrace(void **buffer, int size) {
+  (void)buffer; (void)size; return 0;
+}
+static inline char **backtrace_symbols(void *const *buffer, int size) {
+  (void)buffer; (void)size; return 0;
+}
+#endif
+EOF
+
+WORKDIR /build/src
+# pipefail so a failing scanelf cannot hide behind the pipe below.
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+# `git fetch` rather than `clone --branch`, so PCLOUDCC_REF may also be a SHA.
+#
+# FORCE_FUSE=3: the Makefile otherwise runs detect_fuse.sh, a bash script.
+# CFLAGS comes from the environment, not the make command line: the Makefile
+# appends it to its own flags, whereas a command-line value would replace them.
+#
+# runtime-deps lists the shared libraries pcloudcc needs as apk `so:` names, so
+# the runtime stage installs exactly what was linked instead of a hand-kept
+# package list that can drift from upstream.
+RUN git init -q \
+    && git fetch --depth 1 \
+        https://github.com/lneely/pcloudcc-lneely.git "${PCLOUDCC_REF}" \
+    && git checkout -q FETCH_HEAD \
+    && git rev-parse HEAD > /build/pcloudcc.commit \
+    && CFLAGS="-I/build/compat" make -j"$(nproc)" FORCE_FUSE=3 \
+    && strip pcloudcc \
+    && mv pcloudcc /build/pcloudcc \
+    && scanelf --needed --nobanner --format '%n#p' /build/pcloudcc \
+        | tr ',' '\n' | sort -u | sed 's/^/so:/' > /build/runtime-deps \
+    && cat /build/runtime-deps
+
+# ===== Stage 2: Runtime =====
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+
+# licenses/source describe this image (the packaging layer, MIT). The bundled
+# pcloudcc binary itself is BSD-3-Clause; its origin is recorded separately.
+LABEL org.opencontainers.image.title="pcloudcc" \
+      org.opencontainers.image.description="pCloud console client (lneely fork), Alpine variant" \
+      org.opencontainers.image.source="https://github.com/dev-ferris/pcloudcc-docker-image" \
+      org.opencontainers.image.licenses="MIT" \
+      pcloudcc.upstream.source="https://github.com/lneely/pcloudcc-lneely" \
+      pcloudcc.upstream.licenses="BSD-3-Clause"
+
+# Installed explicitly besides the linked libraries:
+#   fuse3                 - fusermount3, used by entrypoint.sh on shutdown
+#   oath-toolkit-oathtool - unattended 2FA login (PCLOUD_TOTP_SECRET)
+#   ca-certificates-bundle - the CA bundle as a plain file. It is in the base
+#                            image only as a dependency of apk-tools, so without
+#                            this the `apk del` below would remove it.
+# BusyBox provides `mountpoint`, so util-linux is not needed.
+#
+# apk-tools is removed last. It is the only user of libssl3/libcrypto3 in the
+# base image, and pcloudcc uses mbedTLS, so this drops OpenSSL from the image
+# just like the Debian variant. The image cannot install packages afterwards;
+# extend it in a stage that runs before this one if you need to.
+#
+# /pcloud is the default mount point; created here so it exists even with
+# read_only: true and no bind mount. /usr/local/lib/pcloudcc must exist before
+# the COPY --chmod=644 below (see the matching note in Dockerfile).
+# runtime-deps is one `so:` name per line and must be word-split.
+# hadolint ignore=SC2046
+RUN --mount=type=bind,from=builder,source=/build/runtime-deps,target=/tmp/runtime-deps \
+    apk add --no-cache \
+        fuse3 \
+        oath-toolkit-oathtool \
+        ca-certificates-bundle \
+        $(cat /tmp/runtime-deps) \
+    && apk del --no-cache --purge apk-tools \
+    && mkdir -p /pcloud /usr/local/lib/pcloudcc
+
+COPY --from=builder /build/pcloudcc /usr/local/bin/pcloudcc
+# The upstream commit the binary was actually built from.
+COPY --from=builder /build/pcloudcc.commit /usr/local/share/pcloudcc/upstream-commit
+COPY --chmod=644 common.sh /usr/local/lib/pcloudcc/common.sh
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY --chmod=755 healthcheck.sh /healthcheck.sh
+
+# Only non-credential settings get a default here. Credentials are supplied at
+# runtime (preferably as secret files) and never baked into image metadata.
+# ENABLE_BINDFS, BINDFS_TARGET, UID and GID are deprecated aliases, see
+# apply_bindfs_compat() in entrypoint.sh.
+ENV PCLOUD_MOUNT="/pcloud" \
+    ENABLE_BINDFS="0" \
+    BINDFS_TARGET="/pcloud" \
+    UID="1000" \
+    GID="1000" \
+    MOUNT_TIMEOUT="60"
+
+# Each probe reads the pCloud root (plus the Crypto Folder when configured),
+# which pcloudcc may serve over the network, so probe once a minute.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["/healthcheck.sh"]
+
+ENTRYPOINT ["/entrypoint.sh"]

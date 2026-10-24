@@ -27,10 +27,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Run hadolint
+      - name: Run hadolint (Debian)
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: Dockerfile
+
+      - name: Run hadolint (Alpine)
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile.alpine
+
+      # Both variants must build the same upstream commit. check-upstream.yml
+      # moves the pins together; this catches a hand edit of only one.
+      - name: Check that both Dockerfiles pin the same upstream commit
+        run: |
+          debian=$(sed -nE 's/^ARG PCLOUDCC_REF=([0-9a-f]{40})$/\1/p' Dockerfile)
+          alpine=$(sed -nE 's/^ARG PCLOUDCC_REF=([0-9a-f]{40})$/\1/p' Dockerfile.alpine)
+          if [ -z "${debian}" ] || [ "${debian}" != "${alpine}" ]; then
+            echo "ERROR: PCLOUDCC_REF differs: Dockerfile=${debian:-none}, Dockerfile.alpine=${alpine:-none}" >&2
+            exit 1
+          fi
+          echo "Both pin ${debian}"
 
   actionlint:
     name: Actionlint (workflows)
@@ -65,6 +82,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # dash is /bin/sh in the image, so run the tests with it.
-      - name: Run tests
+      # dash is /bin/sh in the Debian image, so run the tests with it.
+      - name: Run tests (dash, Debian image shell)
         run: dash tests/run.sh
+
+      # BusyBox ash is /bin/sh in the Alpine image, and BusyBox also supplies
+      # find, ls, sed and mountpoint there. Run in the pinned base image so the
+      # tests see exactly those applets.
+      - name: Run tests (BusyBox ash, Alpine image shell)
+        run: |
+          image=$(sed -nE 's/^FROM (alpine:[^ ]+) AS builder$/\1/p' Dockerfile.alpine)
+          test -n "${image}"
+          docker run --rm -v "${PWD}:/src:ro" -w /src "${image}" sh tests/run.sh

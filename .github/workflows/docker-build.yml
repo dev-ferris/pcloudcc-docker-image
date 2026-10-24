@@ -35,7 +35,21 @@ env:
 
 jobs:
   build:
+    name: build (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    # Two images from the same scripts: Debian (the default, unsuffixed tags)
+    # and Alpine (same tags with an `-alpine` suffix). Each variant gates and
+    # publishes on its own, so a broken Alpine build never blocks Debian.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: debian
+            dockerfile: Dockerfile
+            suffix: ''
+          - variant: alpine
+            dockerfile: Dockerfile.alpine
+            suffix: '-alpine'
     # Generous ceiling for the QEMU-emulated arm builds; still far below the
     # 6h GitHub default so a hung build can't block the runner all day.
     timeout-minutes: 180
@@ -161,6 +175,10 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             ${{ steps.dockerhub_check.outputs.enabled == 'true' && format('docker.io/{0}', steps.dockerhub_check.outputs.image) || '' }}
+          # Every tag of a variant carries its suffix (`latest-alpine`,
+          # `1.2-alpine`, ...); the Debian variant has none.
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
           # Channels use disjoint tag namespaces, so a dev or edge build can
           # never overwrite a tag a release build publishes. `nightly` is the
           # old name of `weekly`, kept for existing users.
@@ -182,6 +200,7 @@ jobs:
           labels: |
             org.opencontainers.image.ref.name=${{ github.ref_name }}
             pcloudcc.build.channel=${{ steps.channel.outputs.name }}
+            pcloudcc.build.variant=${{ matrix.variant }}
 
       # Build linux/amd64 locally so Trivy can gate on it before anything is
       # published. Multi-platform builds can't be loaded into the local daemon,
@@ -190,6 +209,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: false
           outputs: type=docker,dest=/tmp/scan-image.tar
@@ -207,7 +227,7 @@ jobs:
           no-cache: ${{ github.event_name == 'schedule' }}
           # Read from the shared cache; don't write — the full multi-platform
           # build below will update it.
-          cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache{2}', env.REGISTRY, env.IMAGE_NAME, matrix.suffix) || '' }}
 
       # Report: full SARIF for the Security tab — every severity, including
       # findings without an available fix. Non-blocking; the gate below decides
@@ -260,24 +280,25 @@ jobs:
             sh -n /healthcheck.sh
             sh -n /usr/local/lib/pcloudcc/common.sh
             # entrypoint.sh needs a fusermount binary to tear FUSE mounts down
-            # on shutdown. The Debian fuse3 package currently provides both
-            # fusermount3 and the fuse 2.x compat name; assert at least one
-            # survives a base image change, rather than finding out about it
-            # from stale mounts left on a users host.
+            # on shutdown. The fuse3 package provides fusermount3 (Debian also
+            # ships the fuse 2.x compat name); assert at least one survives a
+            # base image change, rather than finding out about it from stale
+            # mounts left on a users host.
             command -v fusermount3 || command -v fusermount || {
               echo "ERROR: no fusermount binary in the runtime image"; exit 1; }
-            # mountpoint comes from util-linux, which is Essential in Debian and
-            # therefore no longer installed explicitly. Assert it is really there
-            # so a de-essentialization in a future base image fails here rather
-            # than at container start.
+            # mountpoint comes from util-linux (Essential in Debian) or BusyBox
+            # (Alpine) and is not installed explicitly. Assert it is really
+            # there so a base image change fails here rather than at container
+            # start.
             command -v mountpoint
             command -v oathtool
             # bindfs was removed; entrypoint.sh must not start depending on it
             # again by accident.
             if [ -e /usr/bin/bindfs ]; then
               echo "ERROR: bindfs is back in the runtime image"; exit 1; fi
-            # ca-certificates (and with it openssl/libssl3) was dropped in favour
-            # of copying just the generated bundle out of the builder stage.
+            # Neither variant ships the openssl tool: Debian copies just the CA
+            # bundle out of the builder stage, Alpine removes apk-tools, the
+            # only user of OpenSSL there. pcloudcc itself uses mbedTLS.
             test -s /etc/ssl/certs/ca-certificates.crt
             if command -v openssl >/dev/null 2>&1; then
               echo "ERROR: openssl is back in the runtime image"; exit 1; fi
@@ -289,7 +310,8 @@ jobs:
             cat /usr/local/share/pcloudcc/upstream-commit
             echo "--- ldd /usr/local/bin/pcloudcc ---"
             ldd /usr/local/bin/pcloudcc
-            if ldd /usr/local/bin/pcloudcc 2>&1 | grep -q "not found"; then
+            # glibc ldd says "not found", musl ldd "Error loading".
+            if ldd /usr/local/bin/pcloudcc 2>&1 | grep -qE "not found|Error loading"; then
               echo "ERROR: pcloudcc has unresolved shared libraries"
               exit 1
             fi
@@ -313,6 +335,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -326,12 +349,12 @@ jobs:
           # On scheduled runs the registry cache is skipped for the same reason
           # as above; the freshly built amd64 layers still come from the local
           # BuildKit cache, only arm64/arm-v7 are rebuilt from scratch.
-          cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          cache-from: ${{ github.event_name != 'schedule' && format('type=registry,ref={0}/{1}:buildcache{2}', env.REGISTRY, env.IMAGE_NAME, matrix.suffix) || '' }}
           # Only release builds write the shared cache. A dev build still reads
           # it for a warm start, but must not write to it: the cache is keyed on
           # layer content, so a branch that changes the Dockerfile would have
           # pushed its layers into the cache that main builds restore from.
-          cache-to: ${{ steps.channel.outputs.release == 'true' && format('type=registry,ref={0}/{1}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          cache-to: ${{ steps.channel.outputs.release == 'true' && format('type=registry,ref={0}/{1}:buildcache{2},mode=max,image-manifest=true,oci-mediatypes=true', env.REGISTRY, env.IMAGE_NAME, matrix.suffix) || '' }}
 
       - name: Install Cosign
         if: github.event_name != 'pull_request'
@@ -355,7 +378,8 @@ jobs:
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: trivy-results.sarif
-          category: trivy
+          # Debian keeps the original category so its alert history carries on.
+          category: ${{ matrix.variant == 'debian' && 'trivy' || format('trivy-{0}', matrix.variant) }}
 
       - name: Update Docker Hub description
         # The description sync hits Docker Hub's /v2/repositories/<ns>/<repo>/
@@ -372,6 +396,7 @@ jobs:
           github.event_name == 'push'
           && github.ref == 'refs/heads/main'
           && steps.dockerhub_check.outputs.enabled == 'true'
+          && matrix.variant == 'debian'
         continue-on-error: true
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
         with:
