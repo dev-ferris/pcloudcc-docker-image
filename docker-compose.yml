@@ -24,10 +24,10 @@ volumes:
 
 services:
   pcloud:
+    # Builds the upstream commit pinned in the Dockerfile. To build another
+    # one, add `args: { PCLOUDCC_REF: <tag or commit SHA> }`.
     build:
       context: .
-      args:
-        PCLOUDCC_REF: main
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards signals to the entrypoint.
     init: true
@@ -70,16 +70,11 @@ services:
       - no-new-privileges:true
     devices:
       - /dev/fuse
-    # Drop all default capabilities and add back only what is actually needed.
-    # SYS_ADMIN: required for FUSE mount/umount by pcloudcc.
-    # CHOWN:     required by entrypoint.sh to chown the mount point to USER:GROUP.
-    #            Note this now lands on the host directory bind-mounted above,
-    #            while it is still empty and before pcloudcc mounts over it.
+    # Drop all default capabilities; SYS_ADMIN is needed for the FUSE mount.
     cap_drop:
       - ALL
     cap_add:
       - SYS_ADMIN
-      - CHOWN
     # Required for first-time interactive login; can be removed after initial credential setup.
     stdin_open: true
     tty: true

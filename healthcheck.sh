@@ -6,59 +6,22 @@
 #   1 = unhealthy
 set -u
 
-: "${PCLOUD_MOUNT:=/pcloud}"
-: "${ENABLE_BINDFS:=0}"
-: "${BINDFS_TARGET:=/pcloud}"
-: "${PCLOUD_CRYPT:=}"
-: "${PCLOUD_CRYPT_FILE:=}"
+# shellcheck source=common.sh
+. "${PCLOUDCC_LIB:-/usr/local/lib/pcloudcc/common.sh}"
 
-# Bootstrap: no saved credentials yet. The entrypoint either waits for a
-# manual first-time login (sleep infinity) or is currently performing one.
-# Either way, report healthy so Docker does not kill the container before
-# the user can finish setup.
-[ -f /root/.pcloud/data.db ] || exit 0
+# No saved credentials yet: the entrypoint is waiting for or performing the
+# first-time login. Report healthy so Docker does not kill the container
+# before setup can finish.
+[ -f "${PCLOUD_DATA_DB}" ] || exit 0
 
-# Determine the user-facing mount. bindfs is no longer part of the image, but
-# ENABLE_BINDFS=1 is still honoured for compatibility: apply_bindfs_compat() in
-# entrypoint.sh then points pcloudcc's own mount at BINDFS_TARGET, so the probe
-# target is unchanged from when an overlay was actually mounted there.
-if [ "${ENABLE_BINDFS}" = "1" ]; then
-  mnt="${BINDFS_TARGET}"
-else
-  mnt="${PCLOUD_MOUNT}"
-fi
+mnt="$(effective_mount)"
 
-# The pCloud filesystem must be mounted and populated. An empty directory
-# means pcloudcc has not (yet) finished mounting. `find -print -quit` stops at
-# the first entry; `ls -A` would read the whole pCloud root — a readdir served
-# over the network by pcloudcc — on every probe just to test for emptiness.
-mountpoint -q "${mnt}" || exit 1
-[ -n "$(find "${mnt}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] || exit 1
+# The pCloud filesystem must be mounted and populated.
+mount_ready "${mnt}" || exit 1
 
-# When a crypto password is configured (inline, via *_FILE or as a secret),
-# the "Crypto Folder" must be unlocked. The folder itself always exists in
-# the pcloud mount — even when locked — so a plain `[ -d ]` test is
-# insufficient. Access to its contents, however, is denied by pcloudcc's
-# FUSE layer until `crypto start` succeeds, producing errors like:
-#
-#   ls: fts_read: Permission denied
-#
-# We exercise that path with `ls -al` (which forces stat on `.`/`..` and
-# triggers the FUSE permission check) and rely on its non-zero exit code
-# to flag a locked or failed-unlock state. LC_ALL=C keeps the message
-# locale-independent for the belt-and-suspenders grep fallback.
-# /run/secrets/pcloud_crypt is the Compose/Swarm secret entrypoint.sh picks up
-# on its own; -s so an empty placeholder file does not count as configured.
-if [ -n "${PCLOUD_CRYPT}" ] || [ -n "${PCLOUD_CRYPT_FILE}" ] \
-    || [ -s /run/secrets/pcloud_crypt ]; then
-  crypto_dir="${mnt}/Crypto Folder"
-  [ -d "${crypto_dir}" ] || exit 1
-  crypto_out=$(LC_ALL=C ls -al "${crypto_dir}" 2>&1)
-  crypto_rc=$?
-  [ "${crypto_rc}" -eq 0 ] || exit 1
-  case "${crypto_out}" in
-    *"Permission denied"*) exit 1 ;;
-  esac
+# With a crypto password configured, the Crypto Folder must be unlocked.
+if crypto_configured; then
+  crypto_unlocked "${mnt}" || exit 1
 fi
 
 exit 0

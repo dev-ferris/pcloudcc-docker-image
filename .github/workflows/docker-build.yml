@@ -15,9 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       pcloudcc_ref:
-        description: 'lneely/pcloudcc-lneely ref to build (branch, tag, or commit SHA)'
+        # Empty builds the commit pinned in the Dockerfile. Anything else is an
+        # `edge` build: published only as `edge`/`edge-<ref>`, never `latest`.
+        description: 'lneely/pcloudcc-lneely ref to build (branch, tag or SHA); empty = pinned commit'
         required: false
-        default: 'main'
+        default: ''
         type: string
 
 concurrency:
@@ -46,6 +48,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The ref ends up in a multi-line build-args block and in an image tag,
+      # so allow only characters that are valid in git refs and safe in both.
+      - name: Validate pcloudcc_ref input
+        if: inputs.pcloudcc_ref != ''
+        env:
+          REF: ${{ inputs.pcloudcc_ref }}
+        run: |
+          if ! printf '%s' "${REF}" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$'; then
+            echo "ERROR: pcloudcc_ref '${REF}' contains invalid characters" >&2
+            exit 1
+          fi
 
       # Only the multi-platform push build below needs emulation, and that step
       # is skipped on pull requests — the scan build is amd64-only and runs
@@ -101,27 +115,41 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Everything published from a ref other than the default branch (or a
-      # v* tag) is a development image. Two things have to follow from that:
-      # it must never take a tag a release build could also take, and it has
-      # to say so in its own metadata — up to now the only hint was
-      # org.opencontainers.image.version happening to hold a branch name.
+      # Three channels, each with its own tags (see README "Image tags"):
+      #   release - default branch or v* tag, built from the pinned upstream
+      #   edge    - manual/upstream-triggered build of another upstream ref
+      #   dev     - any other branch of this repository
+      # Only release builds may take `latest`, the branch tag or the dated tag.
       - name: Classify build channel
         id: channel
         env:
           REF: ${{ github.ref }}
+          UPSTREAM_REF: ${{ inputs.pcloudcc_ref }}
           # Absent from some event payloads, so fall back rather than
           # misclassifying a scheduled release build as a dev build.
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           default_branch="${DEFAULT_BRANCH:-main}"
-          case "${REF}" in
-            "refs/heads/${default_branch}"|refs/tags/v*) channel=release ;;
-            *)                                          channel=dev ;;
-          esac
-          echo "name=${channel}" >> "$GITHUB_OUTPUT"
-          echo "release=$([ "${channel}" = release ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "Build channel: ${channel} (ref=${REF}, default branch=${default_branch})"
+          latest=false
+          edge_tag=
+          if [ -n "${UPSTREAM_REF}" ]; then
+            channel=edge
+            # Tags cannot contain '/'; 40 hex chars are more than needed.
+            edge_tag="edge-$(printf '%s' "${UPSTREAM_REF}" | tr '/' '-' | cut -c1-40)"
+          else
+            case "${REF}" in
+              "refs/heads/${default_branch}") channel=release; latest=true ;;
+              refs/tags/v*)                   channel=release ;;
+              *)                              channel=dev ;;
+            esac
+          fi
+          {
+            echo "name=${channel}"
+            echo "release=$([ "${channel}" = release ] && echo true || echo false)"
+            echo "latest=${latest}"
+            echo "edge_tag=${edge_tag}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Build channel: ${channel} (ref=${REF}, upstream=${UPSTREAM_REF:-pinned}, default branch=${default_branch})"
 
       - name: Extract metadata
         id: meta
@@ -133,21 +161,22 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             ${{ steps.dockerhub_check.outputs.enabled == 'true' && format('docker.io/{0}', steps.dockerhub_check.outputs.image) || '' }}
-          # Release and dev tags are kept in disjoint namespaces. Dev builds
-          # get a `dev-` prefix on the branch tag, an immutable `dev-<sha>`,
-          # and crucially NOT the dated tag: that one is unprefixed and shared,
-          # so a branch build used to quietly overwrite the dated tag that a
-          # main build had published the same day.
+          # Channels use disjoint tag namespaces, so a dev or edge build can
+          # never overwrite a tag a release build publishes. `nightly` is the
+          # old name of `weekly`, kept for existing users.
           tags: |
-            type=ref,event=branch,enable=${{ steps.channel.outputs.release == 'true' }}
-            type=ref,event=branch,prefix=dev-,enable=${{ steps.channel.outputs.release != 'true' }}
+            type=ref,event=branch,enable=${{ steps.channel.outputs.name == 'release' }}
+            type=ref,event=branch,prefix=dev-,enable=${{ steps.channel.outputs.name == 'dev' }}
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ steps.channel.outputs.latest == 'true' }}
+            type=schedule,pattern=weekly
             type=schedule,pattern=nightly
-            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' && steps.channel.outputs.release == 'true' }}
-            type=sha,prefix=dev-,enable=${{ github.event_name != 'pull_request' && steps.channel.outputs.release != 'true' }}
+            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.event_name != 'pull_request' && steps.channel.outputs.name == 'release' }}
+            type=sha,prefix=dev-,enable=${{ github.event_name != 'pull_request' && steps.channel.outputs.name == 'dev' }}
+            type=raw,value=edge,enable=${{ steps.channel.outputs.name == 'edge' }}
+            type=raw,value=${{ steps.channel.outputs.edge_tag || 'edge-unused' }},enable=${{ steps.channel.outputs.name == 'edge' }}
           # Makes the channel readable from the image itself (docker inspect),
           # not just inferable from the tag someone happened to pull it by.
           labels: |
@@ -166,8 +195,8 @@ jobs:
           outputs: type=docker,dest=/tmp/scan-image.tar
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
+          # Empty keeps the commit pinned in the Dockerfile.
+          build-args: ${{ inputs.pcloudcc_ref != '' && format('PCLOUDCC_REF={0}', inputs.pcloudcc_ref) || '' }}
           # Scheduled runs exist solely to pick up Debian security updates, but
           # every layer — including `apt-get install` — is a cache hit as long as
           # the registry cache is attached and the base image digest is unchanged.
@@ -221,8 +250,10 @@ jobs:
             test -x /healthcheck.sh
             # Both scripts run under /bin/sh in this image; a syntax error would
             # otherwise only surface at container start.
+            test -r /usr/local/lib/pcloudcc/common.sh
             sh -n /entrypoint.sh
             sh -n /healthcheck.sh
+            sh -n /usr/local/lib/pcloudcc/common.sh
             # entrypoint.sh needs a fusermount binary to tear FUSE mounts down
             # on shutdown. The Debian fuse3 package currently provides both
             # fusermount3 and the fuse 2.x compat name; assert at least one
@@ -281,11 +312,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # PCLOUDCC_REF defaults to 'main' for push/schedule/PR triggers and can be
-          # overridden on manual runs via the workflow_dispatch input (or by
-          # check-upstream.yml when a new upstream tag is detected).
-          build-args: |
-            PCLOUDCC_REF=${{ inputs.pcloudcc_ref || 'main' }}
+          # Empty keeps the commit pinned in the Dockerfile.
+          build-args: ${{ inputs.pcloudcc_ref != '' && format('PCLOUDCC_REF={0}', inputs.pcloudcc_ref) || '' }}
           provenance: mode=max
           sbom: true
           # BuildKit reuses layers from the scan build above (same daemon), so

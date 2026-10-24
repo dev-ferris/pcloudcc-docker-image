@@ -117,7 +117,6 @@ services:
       - ALL
     cap_add:
       - SYS_ADMIN    # FUSE mount/umount
-      - CHOWN        # entrypoint chowns the internal mount point
     stdin_open: true
     tty: true
     logging:                 # cap the log file for a long-running daemon
@@ -127,7 +126,7 @@ services:
         max-file: "3"
 ```
 
-> **Note:** with `read_only: true` the entrypoint can only create and chown `PCLOUD_MOUNT` if that path is writable — either bind-mounted from the host as above, or listed under `tmpfs`. If you point `PCLOUD_MOUNT` somewhere that is neither, startup fails with an explicit error.
+> **Note:** with `read_only: true` the entrypoint can only create `PCLOUD_MOUNT` if that path is writable — either bind-mounted from the host as above, or listed under `tmpfs`. If you point `PCLOUD_MOUNT` somewhere that is neither, startup fails with an explicit error.
 > Once first-time login is complete, remove `stdin_open` and `tty` to reduce the interactive attack surface.
 
 Then jump straight to [step 2](#2-create-your-env-file).
@@ -143,10 +142,15 @@ cosign verify \
 
 ### Image tags
 
-Images built from the default branch or a `v*` tag are **release** images.
-Anything built from another branch is a **development** image and is kept in a
-separate `dev-` namespace, so it can never take a tag a release build would
-also publish:
+Every image is built from one upstream commit. Which one decides its channel:
+
+- **release** — built from the default branch or a `v*` tag of this
+  repository, always with the upstream commit pinned in the `Dockerfile`.
+  Only these take `latest`.
+- **edge** — a newer upstream commit that has not been reviewed yet (see
+  [Supply chain](#supply-chain)). Built, scanned and smoke-tested like a
+  release, but published only under `edge` tags.
+- **dev** — any other branch of this repository.
 
 | Tag | Channel | Produced by |
 |---|---|---|
@@ -154,7 +158,9 @@ also publish:
 | `main` | release | every push to the default branch |
 | `1.2.3`, `1.2` | release | a pushed `v*` git tag |
 | `YYYY-MM-DD` | release | any non-PR release build that day |
-| `nightly` | release | the weekly scheduled rebuild |
+| `weekly` (`nightly`) | release | the weekly scheduled rebuild; `nightly` is the old name, kept for compatibility |
+| `edge` | edge | the most recent build of a new upstream commit or tag |
+| `edge-<ref>` | edge | same, for one upstream commit SHA or tag |
 | `dev-<branch>` | dev | a manual run of the build workflow on that branch |
 | `dev-<sha>` | dev | same, pinned to one commit |
 
@@ -166,9 +172,8 @@ docker image inspect --format '{{index .Config.Labels "pcloudcc.build.channel"}}
   ghcr.io/dev-ferris/pcloudcc-docker-image:latest
 ```
 
-Development images pass the same Trivy gate, smoke test and signing as release
-images, but they are built from unreviewed branches — don't run them in
-production.
+Edge and development images pass the same Trivy gate, smoke test and signing
+as release images, but contain unreviewed code — don't run them in production.
 
 ### Option B: Build from source
 
@@ -284,8 +289,6 @@ From now on, the container will start automatically without manual intervention.
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
 | `PCLOUD_CRYPT_FILE` | No | `/run/secrets/pcloud_crypt` if present | Path to a file with the crypto password; takes precedence over `PCLOUD_CRYPT` |
 | `PCLOUD_MOUNT` | No | `/pcloud` | Where pcloudcc mounts the pCloud filesystem. Must match the host bind mount in `docker-compose.yml` |
-| `USER` | No | `nobody` | Username that owns the mount point |
-| `GROUP` | No | `users` | Group that owns the mount point |
 | `ENABLE_BINDFS` | No | `0` | **Deprecated.** `1` mounts at `BINDFS_TARGET` and fills `PCLOUD_FUSE_OPTS` with `uid=$UID,gid=$GID,allow_other,default_permissions` |
 | `BINDFS_TARGET` | No | `/pcloud` | **Deprecated.** Becomes `PCLOUD_MOUNT` when `ENABLE_BINDFS=1` |
 | `UID` | No | `1000` | **Deprecated.** Applied as the FUSE `uid=` option when `ENABLE_BINDFS=1` |
@@ -320,9 +323,12 @@ There is exactly one filesystem in play: **pcloudcc** mounts your pCloud drive a
 via the `rshared` volume mount. Point `PCLOUD_MOUNT` and the host bind mount at
 the same path and you are done.
 
-Set `USER`/`GROUP` if you care about the ownership of the mount point itself; it
-is `chown`ed before pcloudcc mounts over it, so with the compose file above this
-applies to the host directory while it is still empty.
+File ownership inside the mount comes from the FUSE options `uid=`/`gid=` in
+`PCLOUD_FUSE_OPTS`. The directory underneath is hidden by the mount and is not
+touched: earlier versions ran `chown -R USER:GROUP` on it, which also rewrote
+the ownership of everything already in the bind-mounted host directory. That
+step, the `USER`/`GROUP` variables and the `CHOWN` capability are gone; the
+entrypoint logs a notice if `GROUP` is still set.
 
 ### What happened to bindfs
 
@@ -366,7 +372,7 @@ To limit the blast radius:
 
 - `no-new-privileges:true` prevents privilege escalation via setuid/setgid binaries.
 - `read_only: true` makes the root filesystem read-only; only the named volume and tmpfs mounts are writable.
-- All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) and `CHOWN` (mount-point ownership) are re-added.
+- All default capabilities are dropped via `cap_drop: [ALL]`; only `SYS_ADMIN` (FUSE mount) is re-added.
 - `allow_other` — set explicitly via `PCLOUD_FUSE_OPTS`, or implicitly by `ENABLE_BINDFS=1` — makes the mount reachable by every uid, not just the one that created it. That is what lets the remapped `UID`/`GID` reach the files at all, but it is a widening: leave it off if nothing but `root` needs the mount.
 
 ### Why `allow_other` must be paired with `default_permissions`
@@ -446,7 +452,29 @@ The compose file enables `stdin_open: true` and `tty: true` so you can attach to
 
 ### Supply chain
 
-The image is built from the `lneely/pcloudcc-lneely` upstream. The `check-upstream.yml` workflow polls the upstream `main` branch every 6 hours and triggers an automatic rebuild on new commits, dispatching the **resolved commit SHA** rather than the branch name — `PCLOUDCC_REF` is part of the Docker layer cache key, so a moving branch name would let a "successful" rebuild silently reuse the previously compiled binary. The weekly scheduled build additionally runs with the layer cache disabled, so it genuinely re-resolves `apt-get install` against the current Debian archive instead of republishing an identical image.
+The image compiles `lneely/pcloudcc-lneely`, a fork maintained by a single
+person. Its code runs as root next to your pCloud credentials, so new upstream
+code is never published as `latest` without review:
+
+- The `Dockerfile` pins the upstream commit (`ARG PCLOUDCC_REF=<sha>`). Every
+  release build — pushes, tags and the weekly rebuild — compiles exactly that
+  commit.
+- `check-upstream.yml` polls upstream every 6 hours. For a new commit on
+  `main` it opens (or updates) a pull request that moves the pin, with a link
+  to the upstream diff. **Merging that PR is what releases the new code.**
+- At the same time it dispatches an `edge` build of the new commit (and of new
+  upstream tags), so it is compiled, scanned and smoke-tested right away and
+  can be tried as `:edge` before the PR is merged.
+- The Debian base image is pinned by digest as well; Dependabot proposes
+  updates as pull requests. The weekly rebuild runs without the layer cache, so
+  `apt-get install` picks up current package versions on top of that base.
+
+Two repository settings matter for the pin PRs: *Settings → Actions → General
+→ Allow GitHub Actions to create and approve pull requests* must be enabled.
+PRs opened with the default `GITHUB_TOKEN` do not trigger CI on their own; add
+a fine-grained token with *contents* and *pull requests* write access as the
+`UPSTREAM_BUMP_TOKEN` secret to have CI run on them automatically. Without it,
+the edge build of the same commit is the check to look at.
 
 Every published image is:
 
@@ -466,36 +494,54 @@ docker run --rm --entrypoint cat ghcr.io/dev-ferris/pcloudcc-docker-image:latest
   /usr/local/share/pcloudcc/upstream-commit
 ```
 
-To pin to a specific upstream revision, set `PCLOUDCC_REF` to a tag or commit SHA in your `docker-compose.yml` build args.
+When building yourself, the pinned commit is used unless you override
+`PCLOUDCC_REF` (see [Updating](#updating)).
 
 ## Updating
 
-To pull the latest version of pcloudcc:
+With the pre-built image:
 
 ```bash
-docker compose build --no-cache
+docker compose pull
 docker compose up -d
 ```
 
-`--no-cache` is required, not optional: with `PCLOUDCC_REF: main` the layer that
-fetches and compiles upstream has an unchanged cache key even after upstream
-moves on, so a plain `docker compose build` would rebuild nothing. Alternatively,
-pin `PCLOUDCC_REF` to the commit SHA you want — a changed SHA busts the cache on
-its own.
+When building from source, `git pull` brings in the latest pinned upstream
+commit; a changed `PCLOUDCC_REF` invalidates the build cache on its own:
 
-To pin to a specific version or commit of the lneely fork, edit `docker-compose.yml`:
+```bash
+git pull
+docker compose build
+docker compose up -d
+```
+
+To build a different upstream commit or tag, override the pin in
+`docker-compose.yml`. A commit SHA or tag is preferable to a branch name: with
+a branch, the build cache keeps reusing the old binary until you build with
+`--no-cache`.
 
 ```yaml
 build:
   context: .
   args:
-    PCLOUDCC_REF: v1.2.3   # or a commit hash / branch name
+    PCLOUDCC_REF: 20260707T123504Z   # upstream tag or commit SHA
 ```
+
+## Development
+
+The entrypoint and healthcheck have a test suite that runs without Docker, with
+stubs in place of `pcloudcc` and the mount tools:
+
+```bash
+sh tests/run.sh                  # TEST_VERBOSE=1 shows the entrypoint output
+```
+
+CI runs it together with hadolint, actionlint and shellcheck.
 
 ## Troubleshooting
 
 **Container logs show `status is OFFLINE`:**
-This usually means the SSL fingerprint check failed or credentials are wrong. Rebuild with `--no-cache` to pull the latest lneely fork with updated fingerprints.
+This usually means the SSL fingerprint check failed or credentials are wrong. If pCloud rotated its certificates, a newer upstream commit is needed: try the `edge` image, or build with `PCLOUDCC_REF` set to the latest upstream commit (see [Updating](#updating)).
 
 **First-time login loop:**
 If `data.db` is not being created after login, make sure the `pconfig` volume is persistent and not being recreated.

@@ -56,3 +56,15 @@ jobs:
         env:
           # entrypoint.sh targets POSIX sh (#!/bin/sh), so use the strictest shell.
           SHELLCHECK_OPTS: --shell=sh --severity=warning
+
+  tests:
+    name: Shell tests (entrypoint, healthcheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # dash is /bin/sh in the image, so run the tests with it.
+      - name: Run tests
+        run: dash tests/run.sh
