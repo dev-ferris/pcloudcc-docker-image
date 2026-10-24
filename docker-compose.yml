@@ -1,6 +1,27 @@
 volumes:
   pconfig: {}
 
+# Credentials as secret files instead of environment variables: environment
+# variables stay readable via `docker inspect` for the container's lifetime,
+# secret files do not. Works with plain `docker compose`, no Swarm needed.
+# To use them, create the files (one value per file, chmod 600), uncomment
+# this block and the `secrets:` list in the service, and remove the matching
+# variables from .env. Only list the secrets you actually use — Compose
+# refuses to start if a listed file is missing. The entrypoint finds them
+# under /run/secrets/<name> on its own; no *_FILE variable is needed.
+#
+#   mkdir -p secrets && chmod 700 secrets
+#   printf '%s' 'your-password' > secrets/pcloud_password
+#   chmod 600 secrets/*
+#
+# secrets:
+#   pcloud_password:
+#     file: ./secrets/pcloud_password
+#   pcloud_totp_secret:
+#     file: ./secrets/pcloud_totp_secret
+#   pcloud_crypt:
+#     file: ./secrets/pcloud_crypt
+
 services:
   pcloud:
     build:
@@ -19,6 +40,11 @@ services:
       - /path/to/your/pcloud:/pcloud:rshared
     env_file:
       - .env
+    # See the top-level `secrets:` block above.
+    # secrets:
+    #   - pcloud_password
+    #   - pcloud_totp_secret
+    #   - pcloud_crypt
     environment:
       # PCLOUD_MOUNT is also the image default; it is spelled out because it
       # has to match the bind mount above, and the two should be edited

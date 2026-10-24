@@ -35,7 +35,7 @@ fi
 mountpoint -q "${mnt}" || exit 1
 [ -n "$(find "${mnt}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] || exit 1
 
-# When a crypto password is configured (either inline or via secrets file),
+# When a crypto password is configured (inline, via *_FILE or as a secret),
 # the "Crypto Folder" must be unlocked. The folder itself always exists in
 # the pcloud mount — even when locked — so a plain `[ -d ]` test is
 # insufficient. Access to its contents, however, is denied by pcloudcc's
@@ -47,7 +47,10 @@ mountpoint -q "${mnt}" || exit 1
 # triggers the FUSE permission check) and rely on its non-zero exit code
 # to flag a locked or failed-unlock state. LC_ALL=C keeps the message
 # locale-independent for the belt-and-suspenders grep fallback.
-if [ -n "${PCLOUD_CRYPT}" ] || [ -n "${PCLOUD_CRYPT_FILE}" ]; then
+# /run/secrets/pcloud_crypt is the Compose/Swarm secret entrypoint.sh picks up
+# on its own; -s so an empty placeholder file does not count as configured.
+if [ -n "${PCLOUD_CRYPT}" ] || [ -n "${PCLOUD_CRYPT_FILE}" ] \
+    || [ -s /run/secrets/pcloud_crypt ]; then
   crypto_dir="${mnt}/Crypto Folder"
   [ -d "${crypto_dir}" ] || exit 1
   crypto_out=$(LC_ALL=C ls -al "${crypto_dir}" 2>&1)

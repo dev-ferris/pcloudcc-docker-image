@@ -185,15 +185,26 @@ cd pcloudcc-docker-image
 cp .env.sample .env
 ```
 
-Edit `.env` and set at least `PCLOUD_USER`. Other values are optional:
+Edit `.env` and set at least `PCLOUD_USER`:
 
 ```env
 PCLOUD_USER=your@email.com
-# Set these only for the first start — once data.db is saved you can remove them.
-PCLOUD_PASSWORD=your_account_password
-PCLOUD_TOTP_SECRET=JBSWY3DPEHPK3PXP   # base32 secret from your authenticator (if 2FA is enabled)
-PCLOUD_CRYPT=your_crypto_password
 ```
+
+Passwords and the TOTP secret do not belong in `.env` — put them in secret
+files instead (see [Secrets](#secrets-use-files-not-environment-variables)):
+
+```bash
+mkdir -p secrets && chmod 700 secrets
+printf '%s' 'your-account-password' > secrets/pcloud_password      # first start only
+printf '%s' 'JBSWY3DPEHPK3PXP'      > secrets/pcloud_totp_secret   # first start only, if 2FA is enabled
+printf '%s' 'your-crypto-password'  > secrets/pcloud_crypt         # if you use the Crypto Folder
+chmod 600 secrets/*
+```
+
+Then uncomment the `secrets:` blocks in `docker-compose.yml`, keeping only the
+entries whose files you created. (Commands like the above end up in your shell
+history; creating the files with an editor avoids that.)
 
 #### 3. Adjust volume paths in `docker-compose.yml`
 
@@ -213,33 +224,32 @@ two ways to handle this.
 
 ##### Option 1 — Unattended (recommended)
 
-Set `PCLOUD_PASSWORD` in your `.env` file. If 2FA is enabled, also set
-`PCLOUD_TOTP_SECRET` (the base32 shared secret your authenticator showed you
-when you set up 2FA — usually labeled *secret key* or *manual entry key*).
+Provide the account password as the `pcloud_password` secret. If 2FA is
+enabled, also provide `pcloud_totp_secret` (the base32 shared secret your
+authenticator showed you when you set up 2FA — usually labeled *secret key* or
+*manual entry key*). See step 2 above. The environment variables
+`PCLOUD_PASSWORD` / `PCLOUD_TOTP_SECRET` still work, but stay visible via
+`docker inspect`.
+
 The entrypoint will then perform the first-time login automatically, generate
 a fresh TOTP code via `oathtool`, and save credentials to `data.db`.
-
-```env
-PCLOUD_PASSWORD=your_account_password
-PCLOUD_TOTP_SECRET=JBSWY3DPEHPK3PXP
-```
 
 Alternatively, you can provide a single fresh 6-digit code via `PCLOUD_2FA`
 instead of `PCLOUD_TOTP_SECRET` — but note that codes expire after ~30 seconds,
 so the container must start within that window.
 
-**Once `data.db` has been created, remove `PCLOUD_PASSWORD`, `PCLOUD_TOTP_SECRET`
-and `PCLOUD_2FA` from `.env`** — they are only needed for the initial setup
-and would otherwise sit in the container environment unnecessarily.
+**Once `data.db` has been created, remove the `pcloud_password` and
+`pcloud_totp_secret` secrets (files and compose entries), and `PCLOUD_2FA` if
+you used it** — they are only needed for the initial setup.
 
 ##### Option 2 — Interactive
 
-Leave `PCLOUD_PASSWORD` unset. The container logs will show:
+Provide no account password. The container logs will show:
 
 ```
-No saved credentials found. Either set PCLOUD_PASSWORD (and PCLOUD_TOTP_SECRET
-or PCLOUD_2FA if 2FA is enabled) for automatic login, or run the following
-inside the container:
+No saved credentials found. Either provide the account password as the
+pcloud_password secret (and pcloud_totp_secret if 2FA is enabled) for
+automatic login, or run the following inside the container:
   docker exec -it <container> pcloudcc -u your@email.com -m /pcloud -p -s
 ```
 
@@ -267,12 +277,12 @@ From now on, the container will start automatically without manual intervention.
 |---|---|---|---|
 | `PCLOUD_USER` | Yes | — | Your pCloud account email |
 | `PCLOUD_PASSWORD` | No | — | Account password. If set, the entrypoint performs the first-time login automatically and can be removed once `data.db` exists. |
-| `PCLOUD_PASSWORD_FILE` | No | — | Path to a file with the account password (e.g. `/run/secrets/pcloud_password`); takes precedence over `PCLOUD_PASSWORD` |
+| `PCLOUD_PASSWORD_FILE` | No | `/run/secrets/pcloud_password` if present | Path to a file with the account password; takes precedence over `PCLOUD_PASSWORD`. See [Secrets](#secrets-use-files-not-environment-variables) |
 | `PCLOUD_TOTP_SECRET` | No | — | TOTP shared secret (base32). If set, fresh 6-digit codes are generated on demand with `oathtool`, so first-time login works unattended. |
-| `PCLOUD_TOTP_SECRET_FILE` | No | — | Path to a file with the TOTP secret; takes precedence over `PCLOUD_TOTP_SECRET` |
+| `PCLOUD_TOTP_SECRET_FILE` | No | `/run/secrets/pcloud_totp_secret` if present | Path to a file with the TOTP secret; takes precedence over `PCLOUD_TOTP_SECRET` |
 | `PCLOUD_2FA` | No | — | Single-use 2FA code (alternative to `PCLOUD_TOTP_SECRET` — codes expire after ~30s) |
 | `PCLOUD_CRYPT` | No | — | Crypto folder password (auto-unlocks on start) |
-| `PCLOUD_CRYPT_FILE` | No | — | Path to a file with the crypto password (e.g. `/run/secrets/pcloud_crypt`); takes precedence over `PCLOUD_CRYPT` |
+| `PCLOUD_CRYPT_FILE` | No | `/run/secrets/pcloud_crypt` if present | Path to a file with the crypto password; takes precedence over `PCLOUD_CRYPT` |
 | `PCLOUD_MOUNT` | No | `/pcloud` | Where pcloudcc mounts the pCloud filesystem. Must match the host bind mount in `docker-compose.yml` |
 | `USER` | No | `nobody` | Username that owns the mount point |
 | `GROUP` | No | `users` | Group that owns the mount point |
@@ -370,34 +380,65 @@ So `allow_other` on its own means every uid that can reach the mount has full re
 
 A custom AppArmor profile that restricts the allowed syscalls to exactly those needed by FUSE would further reduce the attack surface but is not included here, as profiles are host-specific.
 
-### Secrets in environment variables
+### Secrets: use files, not environment variables
 
-`PCLOUD_CRYPT`, `PCLOUD_PASSWORD`, `PCLOUD_TOTP_SECRET` and `PCLOUD_2FA` are passed via environment variables, which are briefly visible in `/proc/<pid>/environ` and via `docker inspect` until they are `unset` inside the entrypoint. For higher security, use the corresponding `*_FILE` variants (`PCLOUD_CRYPT_FILE`, `PCLOUD_PASSWORD_FILE`, `PCLOUD_TOTP_SECRET_FILE`) to point to a file (or Docker secret) that contains the value:
+Environment variables are the wrong place for credentials. Whatever is passed
+through `environment:` or `env_file:` stays readable for the container's whole
+lifetime — via `docker inspect`, and in the environment of PID 1 — no matter
+what the entrypoint unsets later. A TOTP secret stored that way sits right
+next to the password, which makes the second factor pointless.
+
+So provide `PCLOUD_PASSWORD`, `PCLOUD_TOTP_SECRET` and `PCLOUD_CRYPT` as secret
+files. Plain `docker compose` supports file-based secrets without Swarm:
+
+```bash
+mkdir -p secrets && chmod 700 secrets
+printf '%s' 'your-account-password' > secrets/pcloud_password
+printf '%s' 'JBSWY3DPEHPK3PXP'      > secrets/pcloud_totp_secret   # only with 2FA
+printf '%s' 'your-crypto-password'  > secrets/pcloud_crypt         # only with Crypto Folder
+chmod 600 secrets/*
+```
 
 ```yaml
-# docker-compose.yml (Docker Swarm)
+# docker-compose.yml
 secrets:
+  pcloud_password:
+    file: ./secrets/pcloud_password
+  pcloud_totp_secret:
+    file: ./secrets/pcloud_totp_secret
   pcloud_crypt:
-    external: true
+    file: ./secrets/pcloud_crypt
 
 services:
   pcloud:
     secrets:
+      - pcloud_password
+      - pcloud_totp_secret
       - pcloud_crypt
-    environment:
-      - PCLOUD_CRYPT_FILE=/run/secrets/pcloud_crypt
 ```
 
-Or with a plain bind-mounted file (Compose standalone):
+Only list the secrets you use — Compose refuses to start when a listed file is
+missing. The entrypoint picks up `/run/secrets/pcloud_password`,
+`/run/secrets/pcloud_totp_secret` and `/run/secrets/pcloud_crypt` on its own;
+the `*_FILE` variables are only needed for other paths. The shipped
+`docker-compose.yml` contains this block commented out, and `.gitignore`
+keeps `secrets/` and `.env` out of git. With Docker Swarm, declare the same
+names as `external: true` secrets instead.
 
-```yaml
-services:
-  pcloud:
-    volumes:
-      - ./secrets/pcloud_crypt.txt:/run/secrets/pcloud_crypt:ro
-    environment:
-      - PCLOUD_CRYPT_FILE=/run/secrets/pcloud_crypt
-```
+Order of precedence per secret: `*_FILE` → `/run/secrets/<name>` → plain
+environment variable. The plain variables keep working for compatibility, but
+the entrypoint logs a notice for each one it finds.
+
+Whichever source is used, the entrypoint keeps the values to itself: they are
+no longer exported, so neither the long-running `pcloudcc` daemon nor any
+helper it starts carries them in its `/proc/<pid>/environ`. The one exception
+is the automatic first-time login, where `pcloudcc` receives the account
+password through `PCLOUD_ACCOUNT_PASSWORD`; that process is replaced by a
+clean daemon as soon as the login has succeeded.
+
+`pcloud_password` and `pcloud_totp_secret` are only needed until
+`/root/.pcloud/data.db` exists — remove them afterwards. `pcloud_crypt` is
+read on every start to unlock the Crypto Folder.
 
 ### Interactive login and `stdin_open`/`tty`
 

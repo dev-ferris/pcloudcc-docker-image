@@ -177,24 +177,59 @@ validate_inputs() {
 # Secret loading
 # ============================================================================
 
-# Reads the file referenced by <file_var> and stores its contents in <value_var>.
-# No-op when <file_var> is empty. Aborts when the file is unreadable.
+# Where Docker and Compose mount secrets declared under `secrets:`.
+SECRETS_DIR="/run/secrets"
+
+# Reads a secret into <value_var>. Source, highest priority first:
+#   1. the file named by <file_var> (e.g. PCLOUD_PASSWORD_FILE)
+#   2. ${SECRETS_DIR}/<secret_name>, if it exists (Compose/Swarm secret)
+#   3. the plain environment variable <value_var>
+# Aborts when a file is configured but unreadable.
 load_secret_file() {
   _value_var="$1"
   _file_var="$2"
+  _default_file="${SECRETS_DIR}/$3"
   eval "_file=\${${_file_var}}"
+  eval "_env_value=\${${_value_var}}"
+
+  # An environment variable stays visible in `docker inspect` and in PID 1's
+  # environment for the container's whole lifetime, whatever this script
+  # unsets later. Say so, even when a file overrides the value.
+  if [ -n "${_env_value}" ]; then
+    echo "NOTICE: ${_value_var} is set as an environment variable and stays readable via" >&2
+    echo "        'docker inspect'. Prefer a secret file: ${_default_file} or ${_file_var}." >&2
+  fi
+  unset _env_value
+
+  if [ -z "${_file}" ] && [ -e "${_default_file}" ]; then
+    _file="${_default_file}"
+  fi
   [ -n "${_file}" ] || return 0
   if [ ! -r "${_file}" ]; then
-    echo "ERROR: ${_file_var} '${_file}' is not readable" >&2
+    echo "ERROR: secret file '${_file}' for ${_value_var} is not readable" >&2
     exit 1
   fi
   eval "${_value_var}=\$(cat \"\${_file}\")"
 }
 
+# Secrets passed through the environment arrive exported, so every child
+# (pcloudcc, oathtool, the `pcloudcc -k` client) would inherit them and expose
+# them in its /proc/<pid>/environ. Re-create each one as a plain, unexported
+# shell variable: this script keeps the value, children no longer see it.
+unexport_secrets() {
+  for _var in PCLOUD_PASSWORD PCLOUD_TOTP_SECRET PCLOUD_CRYPT PCLOUD_2FA; do
+    eval "_val=\${${_var}}"
+    unset "${_var}"
+    eval "${_var}=\${_val}"
+  done
+  unset _var _val
+}
+
 load_secrets() {
-  load_secret_file PCLOUD_CRYPT       PCLOUD_CRYPT_FILE
-  load_secret_file PCLOUD_PASSWORD    PCLOUD_PASSWORD_FILE
-  load_secret_file PCLOUD_TOTP_SECRET PCLOUD_TOTP_SECRET_FILE
+  load_secret_file PCLOUD_CRYPT       PCLOUD_CRYPT_FILE       pcloud_crypt
+  load_secret_file PCLOUD_PASSWORD    PCLOUD_PASSWORD_FILE    pcloud_password
+  load_secret_file PCLOUD_TOTP_SECRET PCLOUD_TOTP_SECRET_FILE pcloud_totp_secret
+  unexport_secrets
 
   # Strip any whitespace from the TOTP base32 secret (paste-friendly).
   if [ -n "${PCLOUD_TOTP_SECRET}" ]; then
@@ -446,9 +481,9 @@ log_provided_secrets() {
 # in normal-daemon mode so crypto IPC commands work afterwards.
 first_time_login() {
   if [ -z "${PCLOUD_PASSWORD}" ]; then
-    echo "No saved credentials found. Either set PCLOUD_PASSWORD (and"
-    echo "PCLOUD_TOTP_SECRET or PCLOUD_2FA if 2FA is enabled) for automatic login,"
-    echo "or run the following inside the container:"
+    echo "No saved credentials found. Either provide the account password as the"
+    echo "pcloud_password secret (and pcloud_totp_secret if 2FA is enabled) for"
+    echo "automatic login, or run the following inside the container:"
     echo "  docker exec -it <container> pcloudcc -u ${PCLOUD_USER} -m ${PCLOUD_MOUNT} -p -s"
     if [ -n "${PCLOUD_2FA}" ]; then
       echo "  (2FA is enabled — append '-t <code>' with a fresh code from your authenticator app;"
@@ -628,7 +663,8 @@ fi
 
 unlock_crypto
 
-# Clear remaining secrets from the environment after startup.
+# Drop the remaining secrets from this shell once startup is done. They are no
+# longer exported (see unexport_secrets), so this only tidies up the script.
 unset PCLOUD_2FA PCLOUD_TOTP_SECRET PCLOUD_PASSWORD 2>/dev/null || true
 
 wait "${PCLOUD_PID}"
