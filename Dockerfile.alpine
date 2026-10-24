@@ -20,6 +20,9 @@ ARG PCLOUDCC_REF=93a99cd6add26ffc403113d1a8f7fca34274fa02
 #   linux-headers - kernel headers; part of the toolchain on Debian
 #   libunwind-dev - pclsync/psynclib.c includes <libunwind.h> when not built
 #                   against glibc (headers only, nothing is linked)
+#   mbedtls3-dev  - pcloudcc needs the mbedTLS 3.x API. Alpine's `mbedtls` is
+#                   4.x, which removed headers such as <mbedtls/aes.h>; the
+#                   3.6 LTS branch is packaged separately as `mbedtls3`.
 RUN apk add --no-cache \
     git \
     build-base \
@@ -27,7 +30,7 @@ RUN apk add --no-cache \
     linux-headers \
     fuse3-dev \
     eudev-dev \
-    mbedtls-dev \
+    mbedtls3-dev \
     readline-dev \
     sqlite-dev \
     zlib-dev \

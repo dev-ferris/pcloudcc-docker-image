@@ -195,7 +195,9 @@ Differences worth knowing:
 
 - **Experimental.** Upstream develops and tests against glibc. pcloudcc builds
   on musl with one small shim (`execinfo.h`, which musl lacks), whose only
-  effect is that a crash prints no backtrace. If you hit a problem, check
+  effect is that a crash prints no backtrace. It links Alpine's `mbedtls3`
+  (the 3.6 LTS branch, like Debian), since pcloudcc does not support
+  mbedTLS 4 yet. If you hit a problem, check
   whether the Debian image has it too before reporting it upstream.
 - **No package manager.** `apk` is removed from the final image, which also
   removes OpenSSL — the Debian image leaves it out for the same reason. To add
