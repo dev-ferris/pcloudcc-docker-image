@@ -21,7 +21,7 @@ This project is essentially a Docker packaging layer. All the real work happens 
 
 - Built from the [lneely fork](https://github.com/lneely/pcloudcc-lneely) with up-to-date SSL fingerprints
 - Based on `debian:trixie-slim` (Debian 13, mbedTLS 3.x native), or on Alpine
-  Linux for a much smaller image (see [Alpine variant](#alpine-variant))
+  Linux for an image about a fifth of the size (see [Alpine variant](#alpine-variant))
 - Supports EU and US pCloud regions
 - Optional 2FA support, with unattended first-time login via `PCLOUD_TOTP_SECRET` (TOTP shared secret)
 - Optional crypto folder unlock
@@ -182,8 +182,15 @@ Every image also exists as an Alpine Linux (musl) build, with the same tags
 plus an `-alpine` suffix: `latest-alpine`, `1.2.3-alpine`, `edge-alpine`, and
 so on. It is built from `Dockerfile.alpine`, runs the same entrypoint and
 healthcheck, takes the same environment variables and secrets, and passes the
-same gates. Only the base image differs, and with it the size: the Alpine
-image is much smaller.
+same gates. Only the base image differs, and with it the size:
+
+| Image | Size on disk |
+|---|---|
+| `latest` (Debian) | 79.1 MB |
+| `latest-alpine` | 16.1 MB |
+
+Measured with `docker images` in October 2026; the exact numbers vary a little
+with the architecture and each rebuild.
 
 ```yaml
 services:
