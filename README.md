@@ -20,7 +20,8 @@ This project is essentially a Docker packaging layer. All the real work happens 
 ## Features
 
 - Built from the [lneely fork](https://github.com/lneely/pcloudcc-lneely) with up-to-date SSL fingerprints
-- Based on `debian:trixie-slim` (Debian 13, mbedTLS 3.x native)
+- Based on `debian:trixie-slim` (Debian 13, mbedTLS 3.x native), or on Alpine
+  Linux for a much smaller image (see [Alpine variant](#alpine-variant))
 - Supports EU and US pCloud regions
 - Optional 2FA support, with unattended first-time login via `PCLOUD_TOTP_SECRET` (TOTP shared secret)
 - Optional crypto folder unlock
@@ -174,6 +175,36 @@ docker image inspect --format '{{index .Config.Labels "pcloudcc.build.channel"}}
 
 Edge and development images pass the same Trivy gate, smoke test and signing
 as release images, but contain unreviewed code — don't run them in production.
+
+### Alpine variant
+
+Every image also exists as an Alpine Linux (musl) build, with the same tags
+plus an `-alpine` suffix: `latest-alpine`, `1.2.3-alpine`, `edge-alpine`, and
+so on. It is built from `Dockerfile.alpine`, runs the same entrypoint and
+healthcheck, takes the same environment variables and secrets, and passes the
+same gates. Only the base image differs, and with it the size: the Alpine
+image is much smaller.
+
+```yaml
+services:
+  pcloud:
+    image: ghcr.io/dev-ferris/pcloudcc-docker-image:latest-alpine
+```
+
+Differences worth knowing:
+
+- **Experimental.** Upstream develops and tests against glibc. pcloudcc builds
+  on musl with one small shim (`execinfo.h`, which musl lacks), whose only
+  effect is that a crash prints no backtrace. It links Alpine's `mbedtls3`
+  (the 3.6 LTS branch, like Debian), since pcloudcc does not support
+  mbedTLS 4 yet. If you hit a problem, check
+  whether the Debian image has it too before reporting it upstream.
+- **No package manager.** `apk` is removed from the final image, which also
+  removes OpenSSL — the Debian image leaves it out for the same reason. To add
+  packages, build your own image from `Dockerfile.alpine` and install them
+  before the `apk del` line.
+- **BusyBox** provides `/bin/sh` and the small tools (`mountpoint`, `find`,
+  `ls`). CI runs the script test suite under BusyBox as well as under dash.
 
 ### Option B: Build from source
 
@@ -523,6 +554,7 @@ a branch, the build cache keeps reusing the old binary until you build with
 ```yaml
 build:
   context: .
+  # dockerfile: Dockerfile.alpine    # build the Alpine variant instead
   args:
     PCLOUDCC_REF: 20260707T123504Z   # upstream tag or commit SHA
 ```
@@ -536,7 +568,10 @@ stubs in place of `pcloudcc` and the mount tools:
 sh tests/run.sh                  # TEST_VERBOSE=1 shows the entrypoint output
 ```
 
-CI runs it together with hadolint, actionlint and shellcheck.
+CI runs it with both image shells (dash for Debian, BusyBox ash for Alpine),
+together with hadolint, actionlint and shellcheck. When you change
+`PCLOUDCC_REF` by hand, change it in both `Dockerfile` and `Dockerfile.alpine`;
+CI fails if they differ.
 
 ## Troubleshooting
 

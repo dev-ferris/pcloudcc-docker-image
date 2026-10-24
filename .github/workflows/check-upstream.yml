@@ -130,7 +130,9 @@ jobs:
             exit 0
           fi
 
-          sed -i -E "s/^ARG PCLOUDCC_REF=[0-9a-f]{40}$/ARG PCLOUDCC_REF=${UPSTREAM_REF}/" Dockerfile
+          # Both variants build the same upstream commit.
+          sed -i -E "s/^ARG PCLOUDCC_REF=[0-9a-f]{40}$/ARG PCLOUDCC_REF=${UPSTREAM_REF}/" \
+            Dockerfile Dockerfile.alpine
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "${BUMP_BRANCH}"

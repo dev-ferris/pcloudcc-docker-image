@@ -9,3 +9,8 @@ ignored:
   # with the weekly rebuild schedule gives us reproducibility within a
   # Debian point release, which is the right trade-off here.
   - DL3008
+  # DL3018: "Pin versions in apk add" (Dockerfile.alpine)
+  # Same reasoning as DL3008: Alpine drops old package versions from its
+  # index, so pins would break the build. The digest-pinned base image and the
+  # weekly rebuild keep it reproducible within an Alpine release branch.
+  - DL3018
