@@ -66,7 +66,12 @@ LABEL org.opencontainers.image.title="pcloudcc" \
 # BuildKit applies --chmod to parent directories it creates as well, which
 # leaves a directory without the search bit. With cap_drop: ALL, root has no
 # CAP_DAC_OVERRIDE and then cannot open common.sh.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# `apt-get upgrade` pulls in Debian security fixes for packages of the base
+# image that were published after its digest was pinned (e.g. apt, zlib1g).
+# Without it the Trivy gate fails until Dependabot moves the digest.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     fuse3 \
     libfuse3-4 \
     libudev1 \
