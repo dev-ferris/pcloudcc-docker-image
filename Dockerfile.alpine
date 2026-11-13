@@ -9,7 +9,7 @@
 # =============================================================================
 
 # ===== Stage 1: Build =====
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS builder
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS builder
 
 # Must match the pin in Dockerfile; check-upstream.yml moves both together.
 # Keep it on one line: the workflow rewrites it.
@@ -76,7 +76,7 @@ RUN git init -q \
     && cat /build/runtime-deps
 
 # ===== Stage 2: Runtime =====
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 # licenses/source describe this image (the packaging layer, MIT). The bundled
 # pcloudcc binary itself is BSD-3-Clause; its origin is recorded separately.
