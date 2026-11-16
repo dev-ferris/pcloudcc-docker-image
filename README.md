@@ -368,6 +368,34 @@ the ownership of everything already in the bind-mounted host directory. That
 step, the `USER`/`GROUP` variables and the `CHOWN` capability are gone; the
 entrypoint logs a notice if `GROUP` is still set.
 
+### Choosing the host path (NAS owners, read this)
+
+Two properties of the bind-mounted host directory matter more than they look:
+
+- **Use a real, persistent path, not a convenience symlink.** On QNAP, `/share`
+  is a 16 MB tmpfs and the `/share/<Share>` entries are symlinks that QTS
+  recreates on every boot. Bind-mount the path they point at
+  (`/share/CACHEDEV1_DATA/<Share>/...`) instead. Docker silently *creates* a
+  missing bind-mount source directory, so a path that is not there yet when the
+  container starts becomes a real directory on whatever filesystem is underneath
+  — on a tmpfs root that is gone again after the next reboot.
+- **Mount into a subdirectory, not onto the root of a NAS shared folder.** A
+  shared folder's root belongs to the NAS firmware: permissions, ACLs, the
+  recycle bin, share repair, backup and antivirus jobs all operate on it. It is
+  also the blast radius when the FUSE mount goes stale — with the mount on the
+  share root, the whole share becomes unreachable for SMB and the file manager
+  too, instead of just one subdirectory.
+
+So prefer:
+
+```yaml
+      - /share/CACHEDEV1_DATA/pcloud/mnt:/pcloud:rshared
+```
+
+over `/share/pcloud:/pcloud:rshared`. Create the directory once
+(`mkdir -p /share/CACHEDEV1_DATA/pcloud/mnt`) so a typo cannot be papered over
+by Docker creating it somewhere else.
+
 ### What happened to bindfs
 
 Earlier versions ran a second FUSE process: pcloudcc mounted at
@@ -593,6 +621,46 @@ If `data.db` is not being created after login, make sure the `pconfig` volume is
 # Debian/Ubuntu's fuse3 package provides both names; on other distributions
 # the fuse 3.x helper is only installed as `fusermount3`.
 fusermount3 -u /path/to/your/pcloud || fusermount -u /path/to/your/pcloud
+```
+
+**The mount point "disappeared" on the host, `Transport endpoint is not connected`:**
+
+The directory was not deleted. Neither this image nor pcloudcc ever removes it
+— the entrypoint only runs `mkdir -p`. What you are looking at is a *stale FUSE
+mount*: the mount entry is still there while the pcloudcc process behind it is
+gone, so every `stat()` on the path fails with `ENOTCONN`. The name still shows
+up when listing the parent directory, but with every field unknown:
+
+```
+d?????????  ? ?  ?  ?  ? pcloud/
+```
+
+File managers, SMB clients and `df` present that as a missing or broken folder,
+and pcloudcc refuses to mount there on the next start, which looks like "it
+cannot connect any more". It is left behind when the container is killed rather
+than stopped: SIGKILL after the stop grace period, a host reboot or firmware
+update that does not stop containers first, or a power loss. The mount is shared
+with the host through the `:rshared` bind mount, which is what makes it outlive
+the container.
+
+Since the container now clears this itself at startup (unmounting repeatedly,
+because each unclean start can stack another dead mount on the same path), a
+restart is usually enough. Clear it on the host when the log says it could not:
+
+```bash
+sudo umount -l /path/to/your/pcloud
+```
+
+```bash
+ls -ld /path/to/your/pcloud
+```
+
+Repeat until `ls -ld` succeeds. Note that `mount | grep` can come up empty on
+systems whose `/etc/mtab` is a regular file (QNAP among them): a mount created
+inside the container never gets recorded there. `/proc/mounts` is authoritative:
+
+```bash
+grep -i -e fuse -e pcloud /proc/mounts
 ```
 
 ## Migrating from DjSni/docker-image-pCloud
