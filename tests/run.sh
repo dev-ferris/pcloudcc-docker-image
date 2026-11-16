@@ -205,6 +205,19 @@ no_secrets_in() {
   [ -f "$1" ] && ! grep -Eq '^PCLOUD_(PASSWORD|TOTP_SECRET|CRYPT|2FA|ACCOUNT_PASSWORD)=' "$1"
 }
 log_has() { grep -q "$1" "${OUT}/log"; }
+
+# check_log <description> <literal text>: like `check ... log_has`, but prints
+# the captured log when the text is missing - a failure that only shows up on
+# another platform is otherwise invisible in CI.
+check_log() {
+  if grep -qF "$2" "${OUT}/log"; then
+    pass "$1"
+  else
+    fail "$1"
+    echo "       expected to find: $2"
+    sed 's/^/       | /' "${OUT}/log"
+  fi
+}
 rc_is() { [ "$(cat "${OUT}/rc")" = "$1" ]; }
 
 # ============================================================================
@@ -330,7 +343,7 @@ reset_state
 touch "${DB}" "${WORK}/not-a-dir"
 run_entrypoint PCLOUD_MOUNT="${WORK}/not-a-dir"
 check "unusable mount point: entrypoint fails" rc_is 1
-check "unusable mount point: names mkdir's reason" log_has "File exists"
+check_log "unusable mount point: names mkdir's reason" "mkdir:"
 check "unusable mount point: keeps the read_only hint" log_has "read_only: true"
 
 unmount_count() { [ ! -f "${OUT}/unmounts" ] || wc -l < "${OUT}/unmounts"; }
