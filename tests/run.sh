@@ -75,6 +75,30 @@ check_not "validate_mount_path: rejects /etc"   vpath /etc
 check_not "validate_mount_path: rejects '..'"  vpath /mnt/../etc
 check_not "validate_mount_path: rejects relative" vpath pcloud
 
+# mount_is_stale reads the error text of `ls`, so the cases are driven by a
+# stub `ls` on PATH, in a directory used by these subshells only.
+STALE_BIN="${WORK}/stale-bin"
+mkdir -p "${STALE_BIN}"
+cat > "${STALE_BIN}/ls" <<'EOF'
+#!/bin/sh
+# Mimics coreutils/BusyBox `ls` on a path whose FUSE server is gone.
+case " $* " in
+  *" /stale "*)
+    echo "ls: cannot access '/stale': Transport endpoint is not connected" >&2
+    exit 2 ;;
+  *" /denied "*)
+    echo "ls: cannot access '/denied': Permission denied" >&2
+    exit 2 ;;
+esac
+exit 0
+EOF
+chmod +x "${STALE_BIN}/ls"
+stale() { ( PATH="${STALE_BIN}:${PATH}"; . "${ROOT}/common.sh"; mount_is_stale "$1" ); }
+check "mount_is_stale: ENOTCONN path"                stale /stale
+check_not "mount_is_stale: reachable path"             stale /fine
+check_not "mount_is_stale: other stat error is not stale" stale /denied
+check_not "mount_is_stale: real, existing directory"   lib mount_is_stale "${ROOT}"
+
 check_eq "effective_mount: PCLOUD_MOUNT" "/data" \
   "$(PCLOUD_MOUNT=/data ENABLE_BINDFS=0 lib effective_mount)"
 check_eq "effective_mount: ENABLE_BINDFS=1 uses BINDFS_TARGET" "/b" \
@@ -131,8 +155,16 @@ cat > /dev/null
 echo 123456
 EOF
 # The scripts poll in 1-2s steps; a 0.1s sleep keeps the tests fast while
-# still giving the background pcloudcc stub time to run.
-printf '#!/bin/sh\nexec %s 0.1\n' "$(command -v sleep)" > "${BIN}/sleep"
+# still giving the background pcloudcc stub time to run. An absolute path is
+# required: a BusyBox ash built as a standalone shell answers `command -v
+# sleep` with the bare applet name, and the stub would then re-exec itself
+# through PATH forever.
+REAL_SLEEP=$(command -v sleep)
+case "${REAL_SLEEP}" in
+  /*) ;;
+  *) for d in /bin /usr/bin; do [ -x "$d/sleep" ] && REAL_SLEEP="$d/sleep" && break; done ;;
+esac
+printf '#!/bin/sh\nexec %s 0.1\n' "${REAL_SLEEP}" > "${BIN}/sleep"
 chmod +x "${BIN}"/*
 
 reset_state() {
@@ -142,8 +174,11 @@ reset_state() {
 
 # run_entrypoint [VAR=value...]: runs entrypoint.sh with a clean environment,
 # output in ${OUT}/log, exit status in ${OUT}/rc.
+# TEST_PATH_PREFIX lets a single case shadow a stub (set it, run, clear it).
+TEST_PATH_PREFIX=""
+
 run_entrypoint() {
-  env -i PATH="${BIN}:/usr/bin:/bin" \
+  env -i PATH="${TEST_PATH_PREFIX:+${TEST_PATH_PREFIX}:}${BIN}:/usr/bin:/bin" \
     PCLOUDCC_LIB="${ROOT}/common.sh" \
     PCLOUD_DATA_DB="${DB}" \
     PCLOUD_SECRETS_DIR="${SECRETS}" \
@@ -157,13 +192,14 @@ run_entrypoint() {
 }
 
 run_healthcheck() {
-  env -i PATH="${BIN}:/usr/bin:/bin" \
+  env -i PATH="${TEST_PATH_PREFIX:+${TEST_PATH_PREFIX}:}${BIN}:/usr/bin:/bin" \
     PCLOUDCC_LIB="${ROOT}/common.sh" \
     PCLOUD_DATA_DB="${DB}" \
     PCLOUD_SECRETS_DIR="${SECRETS}" \
     PCLOUD_MOUNT="${MNT}" \
-    "$@" sh "${ROOT}/healthcheck.sh" > /dev/null 2>&1
+    "$@" sh "${ROOT}/healthcheck.sh" > "${OUT}/hc-log" 2>&1
 }
+hc_log() { cat "${OUT}/hc-log"; }
 
 no_secrets_in() {
   [ -f "$1" ] && ! grep -Eq '^PCLOUD_(PASSWORD|TOTP_SECRET|CRYPT|2FA|ACCOUNT_PASSWORD)=' "$1"
@@ -259,6 +295,84 @@ reset_state
 touch "${DB}"
 run_entrypoint GROUP=users
 check "notice for the removed GROUP/USER variables" log_has "NOTICE: GROUP (and USER) are no longer used"
+
+# A stale FUSE mount left by an unclean shutdown: ${MNT} cannot be stat'ed
+# until it has been unmounted. The stubs below shadow `ls` and the unmount
+# helpers for one entrypoint run; `unmounts` counts the attempts, and the
+# path becomes reachable again after ${STALE_DEPTH} of them, which is how
+# several stacked dead mounts behave.
+STALE_RUN="${WORK}/stale-run"
+mkdir -p "${STALE_RUN}"
+cat > "${STALE_RUN}/ls" <<EOF
+#!/bin/sh
+# Stale as long as fewer than \${STALE_DEPTH} unmounts have been recorded.
+if [ -z "\${STALE_DEPTH:-}" ]; then exec /bin/ls "\$@"; fi
+_done=0
+[ ! -f "${OUT}/unmounts" ] || _done=\$(wc -l < "${OUT}/unmounts")
+case " \$* " in
+  *" ${MNT} "*)
+    if [ "\${_done}" -lt "\${STALE_DEPTH}" ]; then
+      echo "ls: cannot access '${MNT}': Transport endpoint is not connected" >&2
+      exit 2
+    fi ;;
+esac
+exec /bin/ls "\$@"
+EOF
+cat > "${STALE_RUN}/fusermount3" <<EOF
+#!/bin/sh
+echo "\$*" >> "${OUT}/unmounts"
+rm -f "${OUT}/mounted"
+EOF
+chmod +x "${STALE_RUN}"/*
+
+# A mount point that cannot be created: the failure names mkdir's own reason.
+reset_state
+touch "${DB}" "${WORK}/not-a-dir"
+run_entrypoint PCLOUD_MOUNT="${WORK}/not-a-dir"
+check "unusable mount point: entrypoint fails" rc_is 1
+check "unusable mount point: names mkdir's reason" log_has "File exists"
+check "unusable mount point: keeps the read_only hint" log_has "read_only: true"
+
+unmount_count() { [ ! -f "${OUT}/unmounts" ] || wc -l < "${OUT}/unmounts"; }
+
+TEST_PATH_PREFIX="${STALE_RUN}"
+
+# One dead mount on the path: cleared, then the normal start proceeds.
+reset_state
+touch "${DB}"
+run_entrypoint STALE_DEPTH=1
+check "stale mount: entrypoint starts after clearing it" rc_is 0
+check "stale mount: ...and says what it found" log_has "holds a stale FUSE mount"
+check "stale mount: ...and reports it cleared" log_has "Cleared stale FUSE mount"
+check "stale mount: ...and still starts pcloudcc" test -e "${OUT}/argv-daemon"
+
+# Three stacked dead mounts: unmounted repeatedly until the path is reachable.
+reset_state
+touch "${DB}"
+run_entrypoint STALE_DEPTH=3
+check "stacked stale mounts: entrypoint starts" rc_is 0
+check "stacked stale mounts: unmounted until reachable" \
+  test "$(unmount_count)" -ge 3
+
+# Unmounting does not help (e.g. no privileges): fail with the host recipe
+# instead of the misleading "cannot create mount point" message.
+reset_state
+touch "${DB}"
+run_entrypoint STALE_DEPTH=999
+check "unclearable stale mount: entrypoint fails" rc_is 1
+check "unclearable stale mount: names the path as unreachable" log_has "is still unreachable after"
+check "unclearable stale mount: prints the host unmount command" log_has "umount -l"
+check "unclearable stale mount: does not start pcloudcc" test ! -e "${OUT}/argv-daemon"
+check_not "unclearable stale mount: no misleading read_only hint" log_has "read_only: true"
+
+# The healthcheck names a stale mount instead of just failing.
+reset_state
+touch "${DB}" "${OUT}/mounted" "${MNT}/file"
+check_not "healthcheck: unhealthy on a stale mount" run_healthcheck STALE_DEPTH=1
+check_eq "healthcheck: ...and says so" \
+  "stale FUSE mount at ${MNT} - Transport endpoint is not connected" "$(hc_log)"
+
+TEST_PATH_PREFIX=""
 
 # ============================================================================
 # healthcheck.sh

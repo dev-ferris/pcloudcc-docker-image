@@ -47,22 +47,68 @@ resolve_fusermount() {
   FUSERMOUNT="umount"
 }
 
+# Unmounts $1 once: the FUSE helper first, then a lazy unmount when the mount
+# is busy or its server is already gone. Returns 0 only when one of them
+# reported success, so callers can tell "nothing left to do" from "cannot".
+unmount_once() {
+  resolve_fusermount
+  if [ "${FUSERMOUNT}" = "umount" ]; then
+    umount "$1" 2>/dev/null || umount -l "$1" 2>/dev/null
+  else
+    "${FUSERMOUNT}" -u "$1" 2>/dev/null \
+      || "${FUSERMOUNT}" -u -z "$1" 2>/dev/null \
+      || umount -l "$1" 2>/dev/null
+  fi
+}
+
 # Unmounts $1, falling back to a lazy unmount when it is busy, and warns if
-# the mount is still there afterwards. No-op when nothing is mounted.
+# the mount is still there afterwards. No-op when nothing is mounted. A mount
+# whose server is already gone is not seen here (`mountpoint` needs a stat
+# that ENOTCONN denies) - clear_stale_mount() handles that case.
 fuse_unmount() {
   _mnt="$1"
   mountpoint -q "${_mnt}" 2>/dev/null || return 0
-  resolve_fusermount
-  if [ "${FUSERMOUNT}" = "umount" ]; then
-    umount "${_mnt}" 2>/dev/null || umount -l "${_mnt}" 2>/dev/null || true
-  else
-    "${FUSERMOUNT}" -u "${_mnt}" 2>/dev/null \
-      || "${FUSERMOUNT}" -u -z "${_mnt}" 2>/dev/null \
-      || true
-  fi
+  unmount_once "${_mnt}" || true
   if mountpoint -q "${_mnt}" 2>/dev/null; then
     echo "WARNING: could not unmount '${_mnt}' - it may be left stale on the host" >&2
   fi
+}
+
+# Clears a stale FUSE mount at $1, left behind when an earlier container was
+# killed instead of stopped (SIGKILL after the grace period, host reboot,
+# power loss, firmware update): the mount entry survives while its pcloudcc
+# is gone, every stat() on the path fails with ENOTCONN, and pcloudcc then
+# refuses to mount there - see psync_fuse_get_mountpoint() upstream. Each
+# unclean start can stack another dead mount on the same path, so unmount
+# until the path is reachable again. The mount is shared with the host (the
+# `:rshared` bind mount), so this clears the host's entry as well.
+# Prints a diagnosis and returns 1 when the path stays unreachable.
+clear_stale_mount() {
+  _mnt="$1"
+  mount_is_stale "${_mnt}" || return 0
+
+  echo "NOTICE: '${_mnt}' holds a stale FUSE mount (ENOTCONN, 'Transport endpoint is" >&2
+  echo "        not connected') from an earlier unclean shutdown. Clearing it." >&2
+
+  _cleared=0
+  while [ "${_cleared}" -lt 10 ]; do
+    unmount_once "${_mnt}" || break
+    _cleared=$((_cleared + 1))
+    mount_is_stale "${_mnt}" || break
+  done
+
+  if mount_is_stale "${_mnt}"; then
+    echo "ERROR: '${_mnt}' is still unreachable after ${_cleared} unmount(s)." >&2
+    echo "       Stop this container and clear it on the host:" >&2
+    echo "         fusermount3 -u '${_mnt}' || umount -l '${_mnt}'" >&2
+    echo "       Repeat until 'ls -ld' on the path succeeds - unclean restarts can" >&2
+    echo "       stack several dead mounts on one path." >&2
+    unset _cleared
+    return 1
+  fi
+
+  echo "Cleared stale FUSE mount at '${_mnt}' (${_cleared} unmount(s))."
+  unset _cleared
 }
 
 # Waits up to $2 seconds for pid $1 to exit. Returns 0 if it did, 1 on timeout.
@@ -278,11 +324,14 @@ warn_legacy_mount_point() {
 # Ownership of the directory itself does not matter: the FUSE mount hides it
 # and reports its own (see PCLOUD_FUSE_OPTS uid=/gid=). It only has to exist.
 prepare_mount_point() {
-  if ! mkdir -p "${PCLOUD_MOUNT}" 2>/dev/null; then
-    echo "ERROR: Cannot create mount point '${PCLOUD_MOUNT}'." >&2
-    echo "       With read_only: true it must be bind-mounted or listed under tmpfs." >&2
-    exit 1
-  fi
+  _err=$(mkdir -p "${PCLOUD_MOUNT}" 2>&1) && return 0
+  echo "ERROR: Cannot create mount point '${PCLOUD_MOUNT}'." >&2
+  # mkdir's own message names the reason (read-only filesystem, a stale mount
+  # on a parent directory, ...); the generic hint alone has sent people
+  # looking at `read_only:` for unrelated failures.
+  [ -z "${_err}" ] || printf '%s\n' "${_err}" | sed 's/^/       /' >&2
+  echo "       With read_only: true it must be bind-mounted or listed under tmpfs." >&2
+  exit 1
 }
 
 # ============================================================================
@@ -316,6 +365,9 @@ stop_pcloudcc() {
   fi
   wait "${PCLOUD_PID}" 2>/dev/null || true
   fuse_unmount "${PCLOUD_MOUNT}"
+  # A pcloudcc that died on its own leaves the mount in place with no server
+  # behind it; clear it so the host is not left with an unreachable directory.
+  clear_stale_mount "${PCLOUD_MOUNT}" || true
   PCLOUD_PID=""
 }
 
@@ -434,6 +486,7 @@ apply_bindfs_compat
 warn_unenforced_mount
 warn_legacy_mount_point
 load_secrets
+clear_stale_mount "${PCLOUD_MOUNT}" || exit 1
 prepare_mount_point
 log_provided_secrets
 

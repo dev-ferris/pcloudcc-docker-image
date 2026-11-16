@@ -29,6 +29,21 @@ mount_ready() {
   mountpoint -q "$1" 2>/dev/null && dir_not_empty "$1"
 }
 
+# True when $1 cannot be reached because the FUSE server behind it is gone
+# (ENOTCONN, "Transport endpoint is not connected"). That is what an unclean
+# shutdown leaves behind: the directory entry survives, so `ls` on the parent
+# still shows the name, but every stat() on the path itself fails. To the host
+# the directory then looks broken or deleted, and pcloudcc refuses to mount
+# there. Matching the strerror text keeps this portable across coreutils and
+# BusyBox `ls`; LC_ALL=C keeps it locale-independent.
+mount_is_stale() {
+  _out=$(LC_ALL=C ls -d -- "$1" 2>&1) && return 1
+  case "${_out}" in
+    *"Transport endpoint is not connected"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # True when a crypto password is configured through any supported source.
 # -s on the default secret so an empty placeholder file does not count.
 crypto_configured() {

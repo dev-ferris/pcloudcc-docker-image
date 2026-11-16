@@ -16,6 +16,14 @@ set -u
 
 mnt="$(effective_mount)"
 
+# A stale FUSE mount (ENOTCONN) looks like a missing directory to everything on
+# the host, so name it explicitly: it is visible in `docker inspect` under
+# State.Health and tells the operator what to clear.
+if mount_is_stale "${mnt}"; then
+  echo "stale FUSE mount at ${mnt} - Transport endpoint is not connected"
+  exit 1
+fi
+
 # The pCloud filesystem must be mounted and populated.
 mount_ready "${mnt}" || exit 1
 
