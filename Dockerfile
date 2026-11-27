@@ -7,7 +7,7 @@
 # =============================================================================
 
 # ===== Stage 1: Build =====
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS builder
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS builder
 
 # Upstream commit to build. Pinned so every build of this repository compiles
 # reviewed code; .github/workflows/check-upstream.yml opens a PR to move it
@@ -40,7 +40,7 @@ RUN git init -q \
     && strip pcloudcc
 
 # ===== Stage 2: Runtime =====
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 
 # licenses/source describe this image (the packaging layer, MIT). The bundled
 # pcloudcc binary itself is BSD-3-Clause; its origin is recorded separately.
